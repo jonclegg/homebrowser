@@ -1,0 +1,86 @@
+# GN args — macOS x86_64 release build.
+#
+# The Intel half. Identical to macos-arm64.gn except for target_cpu, and the
+# reasoning for every block below is written out there rather than repeated
+# here — read that file, then this one for what differs.
+#
+# Why it exists at all: an Apple-silicon Mac runs an x86_64 build under
+# Rosetta, and the browser can tell. `navigator.platform` still says MacIntel,
+# but the GPU strings, the CPU count and the timing behaviour are the host's,
+# so a profile claiming an Intel Mac from a translated binary reports a machine
+# nobody has ever owned. Building both slices and merging them is the answer;
+# building one and translating it is not.
+#
+#   browser/build/build.sh macos-arm64
+#   browser/build/build.sh macos-x64
+#   then merge — see below, and NOT with lipo on the main executable.
+
+target_os = "mac"
+target_cpu = "x64"
+
+is_official_build = true
+is_debug = false
+symbol_level = 0
+blink_symbol_level = 0
+dcheck_always_on = false
+
+# --- CRITICAL for anti-detect ------------------------------------------------
+# A build without these cannot decode H.264/AAC while real Chrome can, and two
+# lines of JS tell them apart.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# --- de-Google ---------------------------------------------------------------
+is_chrome_branded = false
+use_official_google_api_keys = false
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+enable_reporting = false
+enable_remoting = false
+# safe_browsing_mode = 0   # DO NOT SET — see macos-arm64.gn for the measured
+#                          # reason (the GN graph does not resolve without it).
+enable_hangout_services_extension = false
+
+# --- Widevine ----------------------------------------------------------------
+# Off, like the arm64 release args: this is the configuration for a binary that
+# may be handed to somebody else, and the CDM is a blob that cannot be
+# redistributed. agent/src/widevine.rs stages one out of the Chrome already
+# installed on the machine at runtime.
+# Turned on 10.09.2026, together with the Windows args, and for a reason
+# measured there rather than assumed here: with the flag off and the CDM staged
+# beside the core by agent/src/widevine.rs, Windows still answered
+# requestMediaKeySystemAccess("com.widevine.alpha") with NotSupportedError while
+# real Chrome on the same machine answered available. Turning it on was the fix,
+# and it cost 346 build steps rather than a full rebuild.
+#
+# macOS has NOT been measured either way. It is set here so the first 153 build
+# on a Mac is made with it rather than repeated because of it; if the answer
+# turns out to differ on this platform, that is worth writing down here.
+#
+# What it does not change: the CDM is still not in this repository, not in a
+# release and not in an installer. bundle_widevine_cdm stays off and the blob
+# arrives at runtime from the user's own Chrome. docs/10 has the licence.
+enable_widevine = true
+
+# --- size --------------------------------------------------------------------
+enable_print_preview = true
+
+# --- toolchain ---------------------------------------------------------------
+use_lld = true
+# 2, not 1 -- see the block in windows-x64.gn. 1 is the INSTRUMENTED build,
+# which is a third slower and writes profile data when it exits; it was here by
+# mistake and produced a 701 MB chrome.dll on Windows before anyone noticed.
+# The profiles it reads come with the checkout (checkout_pgo_profiles).
+chrome_pgo_phase = 2
+
+# An unbranded build otherwise applies fieldtrial_testing_config.json, which
+# force-enables features real stable Chrome ships disabled — including
+# ReduceAcceptLanguage, which trims Accept-Language to one language while
+# navigator.languages still reports the full list. A browser contradicting
+# itself, from a build setting.
+disable_fieldtrial_testing_config = true
+
+# Keep ninja: autoninja in this depot_tools prefers Siso and then refuses an
+# output directory ninja created.
+use_siso = false

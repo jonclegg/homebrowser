@@ -1,0 +1,179 @@
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4654,6 +4654,39 @@
+       return nullptr;
+   }
+ 
++  // Fury: the precision the persona's GPU reports. SwiftShader answers lowp and
++  // mediump with 15,15,10 and 15,14,0, which no Apple or desktop GPU does: they
++  // report full precision at every level (127,127,23 and 31,30,0 on an M-series
++  // Mac). Stored as "rangeMin,rangeMax,precision" under
++  // gpu.shaderPrecision.<VERTEX_SHADER|FRAGMENT_SHADER>.<LOW_FLOAT|...>.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    const char* shader_name =
++        shader_type == GL_VERTEX_SHADER ? "VERTEX_SHADER" : "FRAGMENT_SHADER";
++    const char* precision_name = nullptr;
++    switch (precision_type) {
++      case GL_LOW_FLOAT: precision_name = "LOW_FLOAT"; break;
++      case GL_MEDIUM_FLOAT: precision_name = "MEDIUM_FLOAT"; break;
++      case GL_HIGH_FLOAT: precision_name = "HIGH_FLOAT"; break;
++      case GL_LOW_INT: precision_name = "LOW_INT"; break;
++      case GL_MEDIUM_INT: precision_name = "MEDIUM_INT"; break;
++      case GL_HIGH_INT: precision_name = "HIGH_INT"; break;
++    }
++    if (precision_name) {
++      if (std::optional<std::string> value = config->GetString(
++              std::string("gpu.shaderPrecision.") + shader_name + "." +
++              precision_name)) {
++        std::vector<std::string_view> parts = base::SplitStringPiece(
++            *value, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++        int range_min = 0, range_max = 0, bits = 0;
++        if (parts.size() == 3 && base::StringToInt(parts[0], &range_min) &&
++            base::StringToInt(parts[1], &range_max) &&
++            base::StringToInt(parts[2], &bits)) {
++          return MakeGarbageCollected<WebGLShaderPrecisionFormat>(
++              range_min, range_max, bits);
++        }
++      }
++    }
++  }
+   GLint range[2] = {0, 0};
+   GLint precision = 0;
+   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
+@@ -4685,8 +4718,13 @@
+   // rest of the persona. Replaced wholesale rather than filtered: a list that is
+   // a subset of the real driver's would still describe the real driver.
+   if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    // A WebGL2 context has its own list (0034): extensions folded into core
++    // WebGL2, such as ANGLE_instanced_arrays and OES_vertex_array_object, are
++    // not offered there, and WebGL2-only ones are. Handing it the WebGL1 list
++    // described no implementation that exists.
+     if (std::optional<std::vector<std::string>> extensions =
+-            config->GetStringList("gpu.webglExtensions")) {
++            config->GetStringList(IsWebGL2() ? "gpu.webgl2Extensions"
++                                             : "gpu.webglExtensions")) {
+       result.clear();
+       result.reserve(static_cast<wtf_size_t>(extensions->size()));
+       for (const std::string& name : *extensions) {
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -37,6 +37,8 @@
+ #include "third_party/blink/renderer/modules/webgl/webgl_uniform_location.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_vertex_array_object.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "base/strings/string_number_conversions.h"
++#include "components/fury/fury_config.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ // Populates all parameters for texImage2D, including width, height, depth (set
+@@ -4836,10 +4838,110 @@
+   }
+ }
+ 
++namespace {
++
++// The WebGL2 limits, by the name tools/detect-suite and the persona use. The
++// WebGL1 limits are 0031's; a WebGL2 context answers these before ever reaching
++// that code, so in a container they came straight from SwiftShader while the
++// renderer string said Apple: MAX_SAMPLES 4, MAX_ELEMENTS_INDICES 3000,
++// MIN_PROGRAM_TEXEL_OFFSET -32 against a real M-series Mac's 8, 2147483647, -8.
++// The type is the one the switch below reports, because the JS type is itself
++// part of the answer.
++enum class FuryLimitType { kInt, kInt64, kFloat };
++
++struct FuryWebGL2LimitName {
++  GLenum pname;
++  const char* name;
++  FuryLimitType type;
++};
++
++constexpr FuryWebGL2LimitName kFuryWebGL2Limits[] = {
++    {GL_MAX_3D_TEXTURE_SIZE, "MAX_3D_TEXTURE_SIZE", FuryLimitType::kInt},
++    {GL_MAX_ARRAY_TEXTURE_LAYERS, "MAX_ARRAY_TEXTURE_LAYERS", FuryLimitType::kInt},
++    {GL_MAX_COLOR_ATTACHMENTS, "MAX_COLOR_ATTACHMENTS", FuryLimitType::kInt},
++    {GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS, "MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS", FuryLimitType::kInt64},
++    {GL_MAX_COMBINED_UNIFORM_BLOCKS, "MAX_COMBINED_UNIFORM_BLOCKS", FuryLimitType::kInt},
++    {GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS, "MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS", FuryLimitType::kInt64},
++    {GL_MAX_DRAW_BUFFERS, "MAX_DRAW_BUFFERS", FuryLimitType::kInt},
++    {GL_MAX_ELEMENT_INDEX, "MAX_ELEMENT_INDEX", FuryLimitType::kInt64},
++    {GL_MAX_ELEMENTS_INDICES, "MAX_ELEMENTS_INDICES", FuryLimitType::kInt},
++    {GL_MAX_ELEMENTS_VERTICES, "MAX_ELEMENTS_VERTICES", FuryLimitType::kInt},
++    {GL_MAX_FRAGMENT_INPUT_COMPONENTS, "MAX_FRAGMENT_INPUT_COMPONENTS", FuryLimitType::kInt},
++    {GL_MAX_FRAGMENT_UNIFORM_BLOCKS, "MAX_FRAGMENT_UNIFORM_BLOCKS", FuryLimitType::kInt},
++    {GL_MAX_FRAGMENT_UNIFORM_COMPONENTS, "MAX_FRAGMENT_UNIFORM_COMPONENTS", FuryLimitType::kInt},
++    {GL_MAX_PROGRAM_TEXEL_OFFSET, "MAX_PROGRAM_TEXEL_OFFSET", FuryLimitType::kInt},
++    {GL_MAX_SAMPLES, "MAX_SAMPLES", FuryLimitType::kInt},
++    {GL_MAX_SERVER_WAIT_TIMEOUT, "MAX_SERVER_WAIT_TIMEOUT", FuryLimitType::kInt64},
++    {GL_MAX_TEXTURE_LOD_BIAS, "MAX_TEXTURE_LOD_BIAS", FuryLimitType::kFloat},
++    {GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS, "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS", FuryLimitType::kInt},
++    {GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS, "MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS", FuryLimitType::kInt},
++    {GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS, "MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS", FuryLimitType::kInt},
++    {GL_MAX_UNIFORM_BLOCK_SIZE, "MAX_UNIFORM_BLOCK_SIZE", FuryLimitType::kInt64},
++    {GL_MAX_UNIFORM_BUFFER_BINDINGS, "MAX_UNIFORM_BUFFER_BINDINGS", FuryLimitType::kInt},
++    {GL_MAX_VARYING_COMPONENTS, "MAX_VARYING_COMPONENTS", FuryLimitType::kInt},
++    {GL_MAX_VERTEX_OUTPUT_COMPONENTS, "MAX_VERTEX_OUTPUT_COMPONENTS", FuryLimitType::kInt},
++    {GL_MAX_VERTEX_UNIFORM_BLOCKS, "MAX_VERTEX_UNIFORM_BLOCKS", FuryLimitType::kInt},
++    {GL_MAX_VERTEX_UNIFORM_COMPONENTS, "MAX_VERTEX_UNIFORM_COMPONENTS", FuryLimitType::kInt},
++    {GL_MIN_PROGRAM_TEXEL_OFFSET, "MIN_PROGRAM_TEXEL_OFFSET", FuryLimitType::kInt},
++    {GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, "UNIFORM_BUFFER_OFFSET_ALIGNMENT", FuryLimitType::kInt},
++};
++
++// The configured value of a WebGL2 limit, or nullopt to ask the driver. Stored
++// as strings in the config because MAX_ELEMENT_INDEX and friends overflow the
++// config's 32-bit int.
++std::optional<ScriptValue> FuryConfiguredWebGL2Limit(ScriptState* script_state,
++                                                     GLenum pname) {
++  const fury::FuryConfig* config = fury::FuryConfig::Get();
++  if (!config) {
++    return std::nullopt;
++  }
++  for (const auto& limit : kFuryWebGL2Limits) {
++    if (limit.pname != pname) {
++      continue;
++    }
++    std::optional<std::string> value =
++        config->GetString(std::string("gpu.webgl2Params.") + limit.name);
++    if (!value) {
++      return std::nullopt;
++    }
++    switch (limit.type) {
++      case FuryLimitType::kInt: {
++        int parsed = 0;
++        if (base::StringToInt(*value, &parsed)) {
++          return WebGLAny(script_state, parsed);
++        }
++        break;
++      }
++      case FuryLimitType::kInt64: {
++        int64_t parsed = 0;
++        if (base::StringToInt64(*value, &parsed)) {
++          return WebGLAny(script_state, parsed);
++        }
++        break;
++      }
++      case FuryLimitType::kFloat: {
++        double parsed = 0;
++        if (base::StringToDouble(*value, &parsed)) {
++          return WebGLAny(script_state, static_cast<float>(parsed));
++        }
++        break;
++      }
++    }
++    return std::nullopt;
++  }
++  return std::nullopt;
++}
++
++}  // namespace
++
+ ScriptValue WebGL2RenderingContextBase::getParameter(ScriptState* script_state,
+                                                      GLenum pname) {
+   if (isContextLost())
+     return ScriptValue::CreateNull(script_state->GetIsolate());
++  if (std::optional<ScriptValue> limit =
++          FuryConfiguredWebGL2Limit(script_state, pname)) {
++    return *limit;
++  }
+   switch (pname) {
+     case GL_SHADING_LANGUAGE_VERSION: {
+       return WebGLAny(

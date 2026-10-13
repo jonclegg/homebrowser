@@ -1,0 +1,130 @@
+diff --git a/media/base/supported_types.cc b/media/base/supported_types.cc
+--- a/media/base/supported_types.cc
++++ b/media/base/supported_types.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "media/base/supported_types.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/logging.h"
+@@ -233,6 +235,15 @@
+     return false;
+   }
+ 
++  // HEVC decodes through the platform (VideoToolbox on a Mac, which always
++  // has it); a container has no platform decoder, so canPlayType, MSE and
++  // MediaCapabilities all said no where a Mac says "probably".
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<bool> hevc = config->GetBool("media.hevc")) {
++      return *hevc;
++    }
++  }
++
+ #if BUILDFLAG(ENABLE_PLATFORM_HEVC)
+ #if BUILDFLAG(PLATFORM_HAS_OPTIONAL_HEVC_DECODE_SUPPORT)
+ #if BUILDFLAG(IS_CHROMEOS)
+diff --git a/media/base/BUILD.gn b/media/base/BUILD.gn
+--- a/media/base/BUILD.gn
++++ b/media/base/BUILD.gn
+@@ -420,6 +420,7 @@
+   deps = [
+     "//base",
+     "//base/allocator:buildflags",
++    "//components/fury",
+     "//components/system_media_controls/linux/buildflags",
+     "//gpu/command_buffer/client:interface_base",
+     "//gpu/command_buffer/client:raster_interface",
+diff --git a/third_party/blink/renderer/modules/webcodecs/video_decoder.cc b/third_party/blink/renderer/modules/webcodecs/video_decoder.cc
+--- a/third_party/blink/renderer/modules/webcodecs/video_decoder.cc
++++ b/third_party/blink/renderer/modules/webcodecs/video_decoder.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "third_party/blink/renderer/modules/webcodecs/video_decoder.h"
+ 
++#include <algorithm>
++#include "components/fury/fury_config.h"
++
+ #include <utility>
+ #include <vector>
+ 
+@@ -320,6 +323,16 @@
+ 
+   // If hardware is preferred, asynchronously check for a hardware decoder.
+   if (hw_pref == HardwarePreference::kPreferHardware) {
++    // The persona's GPU decodes these in hardware; the container has none.
++    if (const fury::FuryConfig* fury_config = fury::FuryConfig::Get()) {
++      if (std::optional<std::vector<std::string>> hardware =
++              fury_config->GetStringList("media.hardwareDecoders")) {
++        support->setSupported(std::ranges::find(*hardware, media::GetCodecName(
++                                                  video_type->codec)) !=
++                              hardware->end());
++        return ToResolvedPromise<VideoDecoderSupport>(script_state, support);
++      }
++    }
+     auto* resolver =
+         MakeGarbageCollected<ScriptPromiseResolver<VideoDecoderSupport>>(
+             script_state, exception_state.GetContext());
+diff --git a/third_party/blink/renderer/modules/webcodecs/video_encoder.cc b/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
+--- a/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
++++ b/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
+@@ -5,6 +5,9 @@
+ #include "third_party/blink/renderer/modules/webcodecs/video_encoder.h"
+ 
+ #include <algorithm>
++#include "components/fury/fury_config.h"
++
++#include <algorithm>
+ #include <string>
+ 
+ #include "base/format_macros.h"
+@@ -1797,6 +1800,16 @@
+       IsAcceleratedConfigurationSupported(config->profile, config->options,
+                                           gpu_factories, required_encoder_type)
+           .is_ok();
++  // The persona's GPU encodes these in hardware; the container has none.
++  if (const fury::FuryConfig* fury_config = fury::FuryConfig::Get()) {
++    if (std::optional<std::vector<std::string>> hardware =
++            fury_config->GetStringList("media.hardwareEncoders")) {
++      supported = std::ranges::find(
++                      *hardware,
++                      media::GetCodecName(media::VideoCodecProfileToVideoCodec(
++                          config->profile))) != hardware->end();
++    }
++  }
+   support->setSupported(supported);
+   std::move(callback).Run(support);
+ }
+diff --git a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+--- a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
++++ b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "third_party/blink/renderer/modules/media_capabilities/media_capabilities.h"
+ 
++#include <algorithm>
++#include "components/fury/fury_config.h"
++
+ #include <memory>
+ #include <optional>
+ #include <sstream>
+@@ -1585,6 +1588,17 @@
+   }
+   PendingCallbackState* pending_cb = pending_cb_map_.at(callback_id);
+ 
++  // powerEfficient means a hardware decoder: the persona's GPU has one for
++  // these codecs; without it, H.264 reported false, which no Mac does.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<std::vector<std::string>> hardware =
++            config->GetStringList("media.hardwareDecoders")) {
++      is_supported = std::ranges::find(*hardware,
++                                       media::GetCodecName(video_codec)) !=
++                     hardware->end();
++    }
++  }
++
+   pending_cb->is_gpu_factories_supported = is_supported;
+   ResolveCallbackIfReady(callback_id);
+ }

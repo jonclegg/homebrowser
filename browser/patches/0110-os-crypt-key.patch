@@ -1,0 +1,401 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 55fdbb556b..2cc39423fe 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -2380,6 +2380,7 @@ source_set("browser") {
+     "//components/facilitated_payments/core/features",
+     "//components/feature_engagement",
+     "//components/fury",
++    "//components/fury/key_provider",
+     "//components/fury/location",
+     "//components/history/content/browser",
+     "//components/history_clusters/core",
+diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
+index 548441ccaf..c9e7cb2347 100644
+--- a/chrome/browser/browser_process_impl.cc
++++ b/chrome/browser/browser_process_impl.cc
+@@ -120,6 +120,8 @@
+ #include "components/metrics_services_manager/metrics_services_manager.h"
+ #include "components/metrics_services_manager/metrics_services_manager_client.h"
+ #include "components/network_time/network_time_tracker.h"
++#include "components/fury/key_provider/fury_key.h"
++#include "components/fury/key_provider/fury_key_provider.h"
+ #include "components/os_crypt/async/browser/os_crypt_async.h"
+ #include "components/permissions/permissions_client.h"
+ #include "components/policy/core/common/policy_service.h"
+@@ -1606,6 +1608,21 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+   std::vector<std::pair<size_t, std::unique_ptr<os_crypt_async::KeyProvider>>>
+       providers;
+ 
++  // Fury: a key that travels with the profile rather than with the machine.
++  //
++  // Read here, immediately before the providers are built, because this is the
++  // only place that needs it — keeping it out of //content means keeping it out
++  // of the renderer's dependency graph entirely.
++  //
++  // Highest precedence of the lot, so it wins for encryption wherever it has a
++  // key. The platform providers stay registered below it and are still consulted
++  // for DECRYPTION: a profile written before this patch has "v10" cookies that
++  // must keep opening, and they do, because the tag stored with each value
++  // selects the key. Old rows convert to "f10" as the browser rewrites them.
++  fury::FuryKey::InitializeInBrowser();
++  providers.emplace_back(std::make_pair(
++      /*precedence=*/20u, std::make_unique<fury::FuryKeyProvider>()));
++
+   if (additional_provider_for_test_) {
+     // Explicitly move the KeyProvider but leave the std::optional holding the
+     // pair, this ensures it can only be set once in testing.
+diff --git a/components/fury/key_provider/BUILD.gn b/components/fury/key_provider/BUILD.gn
+new file mode 100644
+index 0000000000..c36ffb9291
+--- /dev/null
++++ b/components/fury/key_provider/BUILD.gn
+@@ -0,0 +1,25 @@
++# Copyright 2026 The Fury Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++# The os_crypt key provider, and the key it hands out.
++#
++# Its own directory, and its own target, on purpose. //components/fury is a
++# component linked into //third_party/blink so that every renderer sees the same
++# fingerprint; blink must not gain a path to the browser's encryption key, and
++# the narrowest way to arrange that is for the key never to enter its dependency
++# graph. Only //chrome/browser depends on this.
++source_set("key_provider") {
++  sources = [
++    "fury_key.cc",
++    "fury_key.h",
++    "fury_key_provider.cc",
++    "fury_key_provider.h",
++  ]
++
++  deps = [
++    "//base",
++    "//components/os_crypt/async/browser:browser",
++    "//components/os_crypt/async/common",
++  ]
++}
+diff --git a/components/fury/key_provider/fury_key.cc b/components/fury/key_provider/fury_key.cc
+new file mode 100644
+index 0000000000..c58c7c6bb2
+--- /dev/null
++++ b/components/fury/key_provider/fury_key.cc
+@@ -0,0 +1,119 @@
++// Copyright 2026 The Fury Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/fury/key_provider/fury_key.h"
++
++#include "base/command_line.h"
++#include "base/files/file.h"
++#include "base/logging.h"
++#include "base/strings/string_number_conversions.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_handle_util.h"
++#endif
++
++namespace fury {
++
++namespace {
++
++// The switch carrying the key. Named here rather than in fury_switches.h
++// because that header belongs to the fingerprint patch, and a patch series is
++// only rebaseable if each patch owns what it touches. The launcher has its own
++// copy of this string, as it does for every switch it passes.
++//
++// One of the two and never both. Chromium compiles with -Werror and
++// -Wunused-const-variable, so declaring the POSIX name unconditionally is a
++// build failure on Windows rather than a harmless leftover:
++//
++//   error: unused variable 'kOsCryptFdSwitch' [-Werror,-Wunused-const-variable]
++//
++// Met on the first Windows build of this patch, 16.08.2026 — which is also the
++// first time any of it was compiled for Windows at all.
++#if BUILDFLAG(IS_WIN)
++// Where there are no descriptors: a HANDLE the agent created inheritable.
++// `-file-handle` and not `-handle` for the reason spelled out in
++// components/fury/fury_switches.h — a bare `-handle` already means a shared
++// memory region elsewhere in this series.
++constexpr char kOsCryptHandleSwitch[] = "fury-oscrypt-file-handle";
++#else
++constexpr char kOsCryptFdSwitch[] = "fury-oscrypt-fd";
++#endif
++
++// A function-local static rather than base::NoDestructor: the type is
++// trivially destructible, and NoDestructor static-asserts against exactly that
++// — it exists to avoid destructor registration for types that would otherwise
++// need it, which this does not.
++std::optional<std::array<uint8_t, FuryKey::kSize>>& Storage() {
++  static std::optional<std::array<uint8_t, FuryKey::kSize>> key;
++  return key;
++}
++
++}  // namespace
++
++// static
++void FuryKey::InitializeInBrowser() {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++#if BUILDFLAG(IS_WIN)
++  if (!command_line.HasSwitch(kOsCryptHandleSwitch)) {
++    return;
++  }
++  uint32_t raw = 0;
++  if (!base::StringToUint(command_line.GetSwitchValueASCII(kOsCryptHandleSwitch),
++                          &raw) ||
++      raw == 0) {
++    LOG(ERROR) << "fury: --" << kOsCryptHandleSwitch << " is not a valid handle";
++    return;
++  }
++  base::File file(base::win::Uint32ToHandle(raw));
++#else
++  if (!command_line.HasSwitch(kOsCryptFdSwitch)) {
++    return;
++  }
++  int fd = -1;
++  if (!base::StringToInt(command_line.GetSwitchValueASCII(kOsCryptFdSwitch),
++                         &fd) ||
++      fd < 0) {
++    LOG(ERROR) << "fury: --" << kOsCryptFdSwitch
++               << " is not a valid descriptor";
++    return;
++  }
++  base::File file(fd);
++#endif
++
++  // Unlike the fingerprint config, a missing key here is NOT fatal. The profile
++  // simply falls back to this machine's own OS-crypt key, which is what a
++  // profile that predates team sync already does. The cost of getting it wrong
++  // is a cookie jar the browser cannot read and therefore discards — bad, but
++  // recoverable by logging in again, where a browser that will not start is
++  // not recoverable at all.
++  std::array<uint8_t, kSize> buffer = {};
++
++  // Read to the end rather than trusting one read: a pipe may hand over fewer
++  // bytes than asked for, and a key that is fifteen right bytes and one zero is
++  // a key that decrypts nothing while looking present.
++  size_t filled = 0;
++  while (filled < kSize) {
++    std::optional<size_t> n = file.ReadAtCurrentPosNoBestEffort(
++        base::span(buffer).subspan(filled));
++    if (!n.has_value() || *n == 0) {
++      break;
++    }
++    filled += *n;
++  }
++  if (filled != kSize) {
++    LOG(ERROR) << "fury: os_crypt key was " << filled << " bytes, expected "
++               << kSize;
++    return;
++  }
++
++  Storage() = buffer;
++}
++
++// static
++std::optional<std::array<uint8_t, FuryKey::kSize>> FuryKey::Get() {
++  return Storage();
++}
++
++}  // namespace fury
+diff --git a/components/fury/key_provider/fury_key.h b/components/fury/key_provider/fury_key.h
+new file mode 100644
+index 0000000000..90a1beb649
+--- /dev/null
++++ b/components/fury/key_provider/fury_key.h
+@@ -0,0 +1,56 @@
++// Copyright 2026 The Fury Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_FURY_KEY_PROVIDER_FURY_KEY_H_
++#define COMPONENTS_FURY_KEY_PROVIDER_FURY_KEY_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <array>
++#include <optional>
++
++namespace fury {
++
++// The key that encrypts this profile's cookies and passwords at rest.
++//
++// # Why this is not in FuryConfig
++//
++// FuryConfig is published into read-only shared memory and inherited by every
++// child process, renderers included (see FuryConfig::InitializeInBrowser) —
++// that is the whole point of it, because the fingerprint has to be identical in
++// every frame and worker. A master key placed there would be readable by the
++// process that runs the visited site's JavaScript, which is the one process on
++// the machine that must never have it.
++//
++// So it arrives on its own descriptor, is read once in the browser process, and
++// is never published anywhere. Nothing in //content or //third_party/blink can
++// reach this header; only the browser-side key provider uses it.
++class FuryKey {
++ public:
++  // AES-256-GCM. See fury_key_provider.h for why not CBC.
++  static constexpr size_t kSize = 32;
++
++  // Reads the key from the descriptor named by --fury-oscrypt-fd, if that
++  // switch is present. Call once, in the browser process, before OSCryptAsync
++  // is constructed.
++  //
++  // Deliberately called from //chrome/browser rather than from //content, where
++  // the fingerprint config is read: nothing in //content or //third_party/blink
++  // should have a path to this header at all, and the narrowest way to arrange
++  // that is for the key never to enter their dependency graph.
++  //
++  // A short read stores nothing and logs: a truncated key is a key that
++  // silently differs from the one the last session used, and the cookie store
++  // answers a wrong key by deleting the jar rather than by complaining.
++  static void InitializeInBrowser();
++
++  // The key, or nullopt when Fury did not supply one — an ordinary Chromium
++  // launch, or a Fury launch of a profile that predates this.
++  static std::optional<std::array<uint8_t, kSize>> Get();
++};
++
++}  // namespace fury
++
++#endif  // COMPONENTS_FURY_KEY_PROVIDER_FURY_KEY_H_
+diff --git a/components/fury/key_provider/fury_key_provider.cc b/components/fury/key_provider/fury_key_provider.cc
+new file mode 100644
+index 0000000000..182b8ac22a
+--- /dev/null
++++ b/components/fury/key_provider/fury_key_provider.cc
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Fury Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/fury/key_provider/fury_key_provider.h"
++
++#include <utility>
++
++#include "components/fury/key_provider/fury_key.h"
++#include "components/os_crypt/async/common/algorithm.mojom.h"
++
++namespace fury {
++
++FuryKeyProvider::FuryKeyProvider() = default;
++FuryKeyProvider::~FuryKeyProvider() = default;
++
++void FuryKeyProvider::GetKey(KeyCallback callback) {
++  std::optional<std::array<uint8_t, FuryKey::kSize>> key = FuryKey::Get();
++  if (!key) {
++    // No key was supplied: an ordinary Chromium launch, or a Fury launch of a
++    // profile from before this existed.
++    //
++    // kPermanentlyUnavailable rather than kTemporarily: a temporary error puts
++    // an empty entry in the key ring under this tag, which would make every
++    // "f10" ciphertext undecryptable-but-recognised — and the cookie store
++    // answers that by deleting the eTLD group. Permanent leaves the tag out of
++    // the ring entirely, which is the honest state when there is no key at all.
++    std::move(callback).Run(
++        kFuryKeyTag,
++        base::unexpected(KeyError::kPermanentlyUnavailable));
++    return;
++  }
++
++  std::move(callback).Run(
++      kFuryKeyTag,
++      os_crypt_async::Encryptor::Key(*key,
++                                     os_crypt_async::mojom::Algorithm::kAES256GCM));
++}
++
++bool FuryKeyProvider::UseForEncryption() {
++  return true;
++}
++
++}  // namespace fury
+diff --git a/components/fury/key_provider/fury_key_provider.h b/components/fury/key_provider/fury_key_provider.h
+new file mode 100644
+index 0000000000..21dc6a18c5
+--- /dev/null
++++ b/components/fury/key_provider/fury_key_provider.h
+@@ -0,0 +1,80 @@
++// Copyright 2026 The Fury Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_FURY_KEY_PROVIDER_FURY_KEY_PROVIDER_H_
++#define COMPONENTS_FURY_KEY_PROVIDER_FURY_KEY_PROVIDER_H_
++
++#include "components/os_crypt/async/browser/key_provider.h"
++
++namespace fury {
++
++// The three bytes prefixed to every ciphertext this provider writes
++// (Encryptor::EncryptString). Deliberately not of the form "vNN":
++// OSCryptAsync CHECKs that no two registered tags are a prefix of one another,
++// and "v10" (keychain, DPAPI), "v11" (freedesktop), "v12" (secret portal) and
++// "v20" (app-bound Windows) are taken.
++//
++// These bytes are on disk in every profile Fury writes. They can never change.
++inline constexpr char kFuryKeyTag[] = "f10";
++
++// Encrypts a profile's cookies under a key that travels with the profile.
++//
++// # The bug this exists to fix
++//
++// Chromium encrypts cookie values under a key that belongs to the MACHINE: a
++// random keychain password on macOS, DPAPI or an app-bound key on Windows. Fury
++// packs a profile directory into a bundle and a colleague unpacks it elsewhere,
++// where that key does not exist — so Chromium cannot decrypt, and
++// SQLitePersistentCookieStore does not skip the rows it cannot read. It runs
++// `DELETE FROM cookies WHERE host_key = ?` for every host in the eTLD+1 group,
++// "for data consistency". Fury then packs the emptied jar and pushes it. One
++// colleague opening a shared profile destroyed its warmed session for the whole
++// team, silently, and the destruction was what got saved.
++//
++// # Why the answers to the interface below are not free choices
++//
++// `UseForEncryption()` must be true and the precedence must be the highest
++// registered, because the main cookie jar takes its encryptor with
++// `Option::kNone` (network_context.cc, CookieEncryptionProviderImpl) and that
++// selects `provider_for_encryption_` — the highest-precedence provider that
++// answered with a key.
++//
++// There used to be a second answer to give here, and where it went matters.
++// Through M150 the interface also carried `IsCompatibleWithOsCryptSync()`,
++// which had to be true for a second set of files: extension cookies, the
++// password reuse manager, the GCM driver and the device OAuth2 token store all
++// asked with `Option::kEncryptSyncCompat`, and that selected a separate
++// provider slot only providers answering true ever filled.
++//
++// M153 removed the method, the option and the slot together. `OSCryptAsync`
++// now keeps one `provider_for_encryption_`, chosen by `UseForEncryption()`
++// alone, and all four of those consumers take the same encryptor as the main
++// cookie jar. Checked against the tree at the 153 rebase rather than assumed:
++// `kEncryptSyncCompat` appears nowhere in it, and `Encryptor` has no `Option`
++// enum at all. The single answer above now covers what once took two.
++//
++// AES-256-GCM, not the AES-128-CBC the platform providers use. GCM is
++// authenticated, so a key that is merely WRONG fails cleanly. CBC does not:
++// `Encryptor` will happily unpad garbage, and the cookie store's own defence
++// against that is a SHA-256(domain) prefix check — after which it still treats
++// the row as unreadable and deletes the whole eTLD+1 group. The point of this
++// patch is to stop that deletion happening, so the algorithm that makes a wrong
++// key ambiguous is the wrong one to choose.
++class FuryKeyProvider : public os_crypt_async::KeyProvider {
++ public:
++  FuryKeyProvider();
++  ~FuryKeyProvider() override;
++
++  FuryKeyProvider(const FuryKeyProvider&) = delete;
++  FuryKeyProvider& operator=(const FuryKeyProvider&) = delete;
++
++ private:
++  // os_crypt_async::KeyProvider:
++  void GetKey(KeyCallback callback) override;
++  bool UseForEncryption() override;
++};
++
++}  // namespace fury
++
++#endif  // COMPONENTS_FURY_KEY_PROVIDER_FURY_KEY_PROVIDER_H_

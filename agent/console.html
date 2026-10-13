@@ -1,0 +1,1298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Homebrowser</title>
+<style>
+/* One screen, nothing scrolls but the conversation. Sessions on the left, the chosen
+   session's live browser in the middle with what it is doing right now under it, and
+   its conversation on the right, held at the newest line with the message box below.
+   Narrower screens put the sessions in a drawer; phones stack browser over conversation. */
+:root {
+  color-scheme: dark;
+  --ground: #0E1014; --panel: #161920; --raised: #1D212A; --line: #2A2F3A; --line-soft: #222630;
+  --ink: #E8EAEF; --muted: #9AA1AD; --soft: #C3C8D1;
+  --accent: #7AA7FF; --accent-strong: #3D6FF0; --accent-wash: #17223A; --accent-line: #263A66; --accent-ink: #B9CEFF;
+  --needs: #F5B23E; --needs-ink: #F8CB73; --needs-wash: #2C2310; --needs-line: #5C4415;
+  --ok: #3FB950; --ok-ink: #7FDB98; --ok-wash: #11261A;
+  --wait: #8A919E; --bad: #FF8A80; --live: #FF5A4E;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans); display: flex; flex-direction: column; overflow: hidden; }
+a { color: var(--accent); }
+button, input, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+[hidden] { display: none !important; }
+.muted { color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: var(--wait); }
+@keyframes pulse { 50% { opacity: .3; } }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--raised); color: var(--ink); font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; }
+.btn:hover { border-color: #3A4150; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
+.btn.amber { background: var(--needs); border-color: var(--needs); color: #1A1305; }
+.btn.quiet { background: transparent; }
+.btn.small { min-height: 30px; padding: 0 10px; font-size: 13px; }
+
+.top { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding: 10px 20px; padding-top: calc(10px + env(safe-area-inset-top, 0px)); border-bottom: 1px solid var(--line); background: var(--panel); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+.top .state { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); }
+.top .state span { display: inline-flex; align-items: center; gap: 6px; }
+.icon-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none; width: 36px; height: 36px; padding: 0; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--soft); cursor: pointer; }
+.icon-btn:hover { background: var(--raised); color: var(--ink); }
+.icon-btn[aria-pressed="true"] { background: var(--raised); color: var(--ink); border-color: var(--line); }
+.sidebar-toggle .badge { position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--needs); }
+
+.app { flex: 1; min-height: 0; display: grid; grid-template-columns: 290px minmax(0, 1fr) 380px; }
+.app.empty { grid-template-columns: 290px minmax(0, 1fr); }
+
+/* sessions */
+.rail { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); }
+.ask { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.ask label { font-weight: 600; font-size: 13px; }
+.ask form { display: flex; gap: 8px; }
+.ask input { flex: 1; min-width: 0; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--ground); }
+.group { padding: 12px 16px 4px; font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.empty-list { padding: 16px; color: var(--muted); }
+.item { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 2px 12px; width: 100%; text-align: left; padding: 8px 16px; border: 0; border-left: 3px solid transparent; background: transparent; cursor: pointer; }
+.item:hover { background: var(--raised); }
+.item[aria-current="true"] { background: var(--raised); border-left-color: var(--accent); }
+.item .thumb { grid-row: span 3; width: 64px; height: 40px; border-radius: 6px; overflow: hidden; background: var(--line-soft); border: 1px solid var(--line); }
+.item .thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+.item .site { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .msg { color: var(--soft); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.status { font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.status.needs { color: var(--needs-ink); } .status.needs .dot { background: var(--needs); }
+.status.working { color: var(--accent); } .status.working .dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.status.paused { color: var(--needs-ink); } .status.paused .dot { background: var(--needs); }
+.status.done { color: var(--ok-ink); } .status.done .dot { background: var(--ok); }
+.status.live { color: var(--ok-ink); } .status.live .dot { background: var(--ok); }
+
+/* the chosen session: header, then the browser filling the rest */
+.stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.session { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 16px; }
+.head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.head h1 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.head .status { font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--raised); }
+.head .asked { flex: 1 1 140px; min-width: 0; color: var(--soft); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.head .actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; }
+
+.frame { flex: 1; min-height: 0; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--panel); }
+.frame.mine { border: 2px solid var(--accent); }
+.frame.needs { border: 2px solid var(--needs); }
+.frame .bar { flex: none; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--line); background: var(--raised); }
+.frame .url-form { flex: 1; min-width: 0; display: flex; margin: 0; position: relative; }
+.suggest { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; right: 0; margin: 0; padding: 4px; list-style: none; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.5); max-height: 320px; overflow-y: auto; }
+.suggest li { display: flex; flex-direction: column; gap: 1px; padding: 6px 9px; border-radius: 6px; cursor: pointer; min-width: 0; }
+.suggest li[aria-selected="true"], .suggest li:hover { background: var(--accent-wash); }
+.suggest .address { font: 12px var(--mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggest .page-title { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frame .url { flex: 1; min-width: 0; font: 12px var(--mono); color: var(--soft); background: var(--ground); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frame .url:focus { color: var(--ink); border-color: var(--accent); outline: none; }
+.frame .url[readonly] { cursor: default; }
+/* full screen: the browser's own, or (iPhone Safari has none for an element) the frame over the whole window */
+.frame:fullscreen { border: 0; border-radius: 0; }
+body.expanded .frame { position: fixed; inset: 0; z-index: 40; border: 0; border-radius: 0; }
+body.expanded .viewport { flex: 1 1 auto; height: auto; }
+.tag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.tag.live { color: var(--bad); } .tag.live .dot { background: var(--live); }
+.tag.mouse { color: var(--accent-ink); } .tag.mouse .dot { background: var(--accent); }
+
+.banner { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid var(--line); }
+.banner .what { flex: 1 1 260px; min-width: 0; }
+.banner .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.banner.needs { background: var(--needs-wash); color: var(--needs-ink); border-color: var(--needs-line); }
+.banner.needs .task-text { color: var(--ink); font-weight: 600; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.banner.mine { background: var(--accent-wash); color: var(--accent-ink); border-color: var(--accent-line); }
+.banner.still { background: var(--raised); color: var(--muted); justify-content: space-between; }
+.banner .phone { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.banner .phone .link { flex: 1; min-width: 0; font: 12px var(--mono); color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.viewport { flex: 1; min-height: 0; position: relative; background: #0A0B0E; }
+.viewport > div, .viewport > img { position: absolute; inset: 0; width: 100%; height: 100%; }
+.viewport > img { object-fit: contain; object-position: center; }
+/* the field a touch screen types into; its keys go to the live browser */
+.viewport > .keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; }
+
+/* what Homebrowser is doing right now, attached to the screen it is doing it on */
+.now { flex: none; display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--raised); font-size: 13px; }
+.now .label { font-weight: 600; white-space: nowrap; }
+.now .text { flex: 1; min-width: 0; color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.now .time { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.now .time { font-variant-numeric: tabular-nums; }
+.now.working .dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.now.working .label { color: var(--accent); }
+.now.done .dot { background: var(--ok); }
+.now.needs, .now.paused { background: var(--needs-wash); }
+.now.needs .label, .now.paused .label { color: var(--needs-ink); }
+.now.needs .dot, .now.paused .dot { background: var(--needs); animation: pulse 1.2s ease-in-out infinite; }
+
+/* conversation */
+.convo { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); }
+.convo-head { flex: none; padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.thread-hint { margin: auto 0 0; color: var(--muted); font-size: 13px; }
+.thread-wrap { flex: 1; min-height: 0; position: relative; }
+.thread { position: absolute; inset: 0; overflow-y: auto; padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.thread > :first-child { margin-top: auto; }
+.m { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.m.you { align-items: flex-end; }
+.m .who { font-size: 11px; color: var(--muted); }
+.bubble { max-width: 94%; padding: 9px 12px; border-radius: 10px; background: var(--raised); white-space: pre-wrap; overflow-wrap: anywhere; }
+.m.you .bubble { background: var(--accent-strong); color: #fff; }
+.m.needs .bubble { background: var(--needs-wash); border: 1px solid var(--needs-line); }
+.m .meta { font-size: 11px; color: var(--muted); }
+.m .working { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; max-width: 94%; font-size: 13px; color: var(--accent); }
+.m .working .dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.m .working.queued { color: var(--muted); } .m .working.queued .dot { background: var(--wait); animation: none; }
+details.steps { width: 94%; font-size: 13px; border-left: 2px solid var(--line); padding: 2px 0 2px 12px; }
+details.steps.running { border-left-color: var(--accent-line); }
+details.steps > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+details.steps.running > summary { color: var(--accent); }
+details.steps ol { margin: 6px 0 0; padding: 0 0 0 20px; display: flex; flex-direction: column; gap: 6px; color: var(--soft); }
+details.steps li.current { color: var(--ink); }
+details.steps li.current::marker { color: var(--accent); }
+details.steps .did { display: block; font: 12px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+details.steps .why, .m .working .why { display: block; font-size: 12px; color: var(--soft); margin-top: 2px; }
+.m .working .why { flex-basis: 100%; }
+details.steps .why b, .m .working .why b, .now .text b { color: var(--muted); font-weight: 600; }
+details.thinking { margin-top: 4px; }
+details.thinking summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+details.thinking div { margin-top: 4px; padding: 8px 10px; border-radius: 6px; background: var(--ground); border: 1px solid var(--line-soft); font-size: 12px; color: var(--muted); white-space: pre-wrap; max-height: 16rem; overflow: auto; }
+.files { display: flex; gap: 6px; flex-wrap: wrap; max-width: 94%; }
+.files a { font-size: 12px; padding: 3px 8px; border-radius: 6px; background: var(--ok-wash); color: var(--ok-ink); text-decoration: none; }
+.jump { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); border-radius: 999px; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+
+.compose { flex: none; padding: 10px 12px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.compose .needs-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; background: var(--needs-wash); border: 1px solid var(--needs-line); color: var(--needs-ink); font-size: 13px; }
+.compose .needs-row span { flex: 1; min-width: 0; }
+/* The box and its button in one pill: ↑ sends, ■ stops the run while the box is empty. */
+.compose .pill { display: flex; align-items: flex-end; gap: 8px; padding: 4px 4px 4px 14px; border-radius: 20px; border: 1px solid var(--line); background: var(--raised); }
+.compose .pill:focus-within { border-color: #3A4150; }
+.compose textarea { flex: 1; min-width: 0; min-height: 30px; max-height: 140px; padding: 5px 0; border: 0; outline: 0; background: transparent; resize: none; field-sizing: content; }
+.compose textarea::placeholder { color: var(--muted); }
+.compose .round { flex: none; width: 30px; height: 30px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer; background: var(--ink); color: var(--ground); }
+.compose .round:hover { background: #fff; }
+.compose .round:disabled { background: #3A4150; color: var(--muted); cursor: default; }
+.compose .round svg { width: 16px; height: 16px; }
+.compose .round .square { width: 10px; height: 10px; border-radius: 2px; background: currentColor; }
+.compose .round.stopping { opacity: .5; }
+.compose .hint { font-size: 11px; color: var(--muted); padding-left: 14px; }
+
+.welcome { padding: 48px 24px; max-width: 34rem; color: var(--soft); }
+.welcome h1 { font-size: 22px; color: var(--ink); margin: 0 0 8px; }
+.top .devices-button { margin-left: auto; }
+dialog { width: min(30rem, calc(100vw - 32px)); padding: 0; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+dialog::backdrop { background: rgba(0,0,0,.6); }
+dialog .dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+dialog h2 { margin: 0; font-size: 16px; }
+dialog .body { padding: 14px 18px 18px; }
+dialog section > p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+.device { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+.device .what { flex: 1; min-width: 0; }
+.device .what b { display: block; }
+.device .what span { color: var(--muted); font-size: 13px; }
+.device .tag { font-size: 12px; color: var(--ok-ink); white-space: nowrap; }
+.btn.danger { color: var(--bad); background: transparent; margin-top: 12px; }
+.welcome .btn { display: none; }
+.notice { display: flex; align-items: flex-start; gap: 12px; margin: 12px 18px 0; padding: 10px 10px 10px 14px; border-radius: 8px; background: var(--ok-wash); color: var(--ok-ink); border: 1px solid #1F4A2C; font-size: 13px; }
+.notice span { flex: 1; min-width: 0; padding-top: 4px; }
+.notice b { color: var(--ink); }
+dialog section + section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+dialog h3 { margin: 0 0 4px; font-size: 14px; }
+dialog .row { display: flex; align-items: center; gap: 12px; }
+dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
+.saved-note { color: var(--ok-ink); font-size: 13px; margin: 8px 0 0; }
+/* the new-password fields (console_auth.FIELDS), in the console's look */
+#password-form { --good: var(--ok-ink); --fair: var(--needs); }
+#password-form label { display: block; font-weight: 600; font-size: 13px; margin: 14px 0 6px; }
+#password-form input:not([hidden]) { width: 100%; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--ground); }
+#password-form input[aria-invalid=true] { border-color: var(--bad); }
+#password-form .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+#password-form .hint.before { margin: -2px 0 8px; }
+#password-form .bad, #password-form .form-error { color: var(--bad); }
+#password-form .form-error { font-size: 13px; margin: 12px 0 0; }
+#password-form .field { position: relative; }
+#password-form .field input { padding-right: 64px; }
+#password-form .field .show { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); padding: 3px 9px; border: 0; border-radius: 6px; background: none; color: var(--accent); font-size: 13px; font-weight: 600; cursor: pointer; }
+#password-form .field .show:hover { background: var(--accent-wash); }
+#password-form .field .tick { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: var(--ok-ink); font-weight: 700; visibility: hidden; }
+#password-form .field .tick.on { visibility: visible; }
+#password-form .strength { display: flex; align-items: center; gap: 10px; margin-top: 8px; min-height: 18px; }
+#password-form .segments { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+#password-form .segments i { height: 4px; border-radius: 2px; background: var(--line); transition: background .15s; }
+#password-form .verdict { font-size: 12px; font-weight: 600; min-width: 6.5em; text-align: right; }
+#password-form .advice { margin-top: 2px; }
+#password-form .buttons { display: flex; gap: 8px; margin-top: 16px; }
+.error { margin: 12px 18px 0; padding: 10px 14px; border-radius: 8px; background: #2A1414; color: var(--bad); border: 1px solid #5A2626; font-size: 13px; }
+.scrim { display: none; }
+
+@media (max-width: 1280px) {
+  .app { grid-template-columns: 250px minmax(0, 1fr) 340px; }
+  .app.empty { grid-template-columns: 250px minmax(0, 1fr); }
+}
+/* wide screens: the sessions column can be hidden */
+@media (min-width: 1101px) {
+  body.rail-hidden .rail { display: none; }
+  body.rail-hidden .app { grid-template-columns: minmax(0, 1fr) 380px; }
+  body.rail-hidden .app.empty { grid-template-columns: minmax(0, 1fr); }
+}
+@media (min-width: 1101px) and (max-width: 1280px) {
+  body.rail-hidden .app { grid-template-columns: minmax(0, 1fr) 340px; }
+}
+/* the sessions move into a drawer */
+@media (max-width: 1100px) {
+  .app, .app.empty { grid-template-columns: minmax(0, 1fr) 340px; }
+  .app.empty { grid-template-columns: minmax(0, 1fr); }
+  .rail { position: fixed; z-index: 20; top: 0; bottom: 0; left: 0; width: min(320px, 88vw); transform: translateX(-105%); transition: transform .2s; padding-top: env(safe-area-inset-top, 0px); }
+  body.drawer .rail { transform: none; box-shadow: 0 0 40px rgba(0,0,0,.6); }
+  body.drawer .scrim { display: block; position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.5); }
+  .welcome .btn { display: inline-flex; margin-top: 8px; }
+}
+/* phones: browser on top, conversation under it, message box at the bottom */
+@media (max-width: 760px) {
+  .top { padding-inline: 16px; gap: 8px 12px; }
+  .top .state { font-size: 12px; gap: 10px; }
+  .app, .app.empty { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  /* The browser gets at most this much; when a note above it needs room, the screen shrinks, not the conversation. */
+  .stage { max-height: 62dvh; }
+  .session { padding: 10px 16px 8px; gap: 8px; }
+  .frame { flex: 0 1 auto; }
+  .viewport { flex: 0 1 auto; height: min(calc((100vw - 32px) * .625), 36vh); min-height: 110px; }
+  .banner.needs .task-text { -webkit-line-clamp: 2; }
+  .banner.needs .hint, .banner .phone { display: none; }
+  .convo { border-left: 0; border-top: 1px solid var(--line); }
+  .convo-head { display: none; }
+  .thread { padding: 10px 16px 14px; }
+  .compose { padding: 8px 16px calc(10px + env(safe-area-inset-bottom, 0px)); }
+  .compose .hint { display: none; }
+  .error, .notice { margin-inline: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <button class="icon-btn sidebar-toggle" type="button" id="sidebar-toggle" aria-label="Hide sidebar" title="Hide sidebar" aria-expanded="true" data-testid="sidebar-toggle">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+    <span class="badge" id="drawer-needs" hidden></span>
+  </button>
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a2.5 2.5 0 0 1 2.5 2.5c0 1.4-1.2 2-2.5 3.2V10"/><path d="M12 10 3 17.5h18L12 10Z"/></svg>
+    Homebrowser
+  </div>
+  <div class="state">
+    <span data-testid="browser-state"><span class="dot" id="browser-dot"></span><span id="browser-text">Connecting…</span></span>
+    <span data-testid="events-state"><span class="dot" id="events-dot"></span><span id="events-text">Live updates off</span></span>
+  </div>
+  <button class="btn small quiet devices-button" type="button" id="devices-open" data-testid="devices-open">Password &amp; devices</button>
+</header>
+
+<dialog id="devices" aria-labelledby="devices-title" data-testid="devices">
+  <div class="dialog-head">
+    <h2 id="devices-title">Password &amp; devices</h2>
+    <button class="btn quiet" type="button" id="devices-close">Close</button>
+  </div>
+  <div class="body">
+    <section aria-labelledby="password-title">
+      <h3 id="password-title">Console password</h3>
+      <div class="row" id="password-closed">
+        <p>You type it to open the console from a share link. A new one signs out every other device.</p>
+        <button class="btn" type="button" id="password-open" data-testid="change-password">Change</button>
+      </div>
+      <p class="saved-note" id="password-saved" hidden role="status">Password changed. Every other device is signed out.</p>
+      <form id="password-form" hidden data-testid="password-form">
+        <input type="text" name="username" value="homebrowser" autocomplete="username" hidden>
+        <label for="current-password">Current password</label>
+        <input id="current-password" name="current" type="password" autocomplete="current-password" required>
+        <!-- password fields -->
+        <p class="form-error" id="password-error" role="alert" hidden></p>
+        <div class="buttons">
+          <button class="btn primary" type="submit">Save password</button>
+          <button class="btn quiet" type="button" id="password-cancel">Cancel</button>
+        </div>
+      </form>
+    </section>
+    <section aria-labelledby="devices-list-title">
+      <h3 id="devices-list-title">Signed-in devices</h3>
+      <p>Each one stays signed in for 30 days on this share link. A new console password, or stopping the share, signs them out.</p>
+      <div id="device-list" data-testid="device-list"></div>
+      <button class="btn danger" type="button" id="sign-out-everywhere" data-testid="sign-out-everywhere">Sign out everywhere</button>
+    </section>
+  </div>
+</dialog>
+
+<div class="scrim" id="scrim"></div>
+<div class="app empty" id="app">
+  <nav class="rail" aria-label="Sessions">
+    <div class="ask">
+      <label for="new-message">Ask Homebrowser to do something</label>
+      <form id="new-form">
+        <input id="new-message" type="text" autocomplete="off" placeholder="e.g. check my order status on example.com" data-testid="new-message">
+        <button class="btn primary" type="submit" data-testid="new-start">Start</button>
+      </form>
+    </div>
+    <div id="groups" data-testid="session-list"></div>
+  </nav>
+
+  <main class="stage" id="detail">
+    <div class="notice" id="notice" hidden role="status" data-testid="saved-notice">
+      <span id="notice-text"></span>
+      <button class="btn quiet small" type="button" id="notice-close">Dismiss</button>
+    </div>
+    <div class="error" id="s-error" hidden role="alert" data-testid="error"></div>
+    <div class="welcome" id="welcome">
+      <h1>Nothing to show yet</h1>
+      <p>Sessions appear here when you or your agent ask Homebrowser to do something. Each one gets its own tab in the browser.</p>
+      <button class="btn primary" type="button" data-open-drawer>Ask Homebrowser to do something</button>
+    </div>
+
+    <div class="session" id="session" hidden>
+      <div class="head">
+        <h1 id="s-title" data-testid="session-title"></h1>
+        <span class="status" id="s-status" data-testid="session-status"><span class="dot"></span><span></span></span>
+        <span class="asked" id="s-asked"></span>
+        <div class="actions" id="s-actions"></div>
+      </div>
+
+      <section class="frame" id="s-browser" aria-label="Browser">
+        <div class="bar">
+          <span class="tag" id="s-tag"><span class="dot"></span><span></span></span>
+          <form class="url-form" id="s-url-form" data-testid="url-form">
+            <input class="url" id="s-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" aria-label="Address" role="combobox" aria-autocomplete="both" aria-controls="s-suggest" aria-expanded="false" data-testid="url">
+            <ul class="suggest" id="s-suggest" role="listbox" hidden data-testid="url-suggestions"></ul>
+          </form>
+          <span class="tag mouse" id="s-driving" hidden><span class="dot"></span>You have the mouse</span>
+          <button class="icon-btn keyboard-toggle" type="button" id="s-keyboard" aria-pressed="false" aria-label="Keyboard" title="Keyboard" data-testid="keyboard" hidden>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
+          </button>
+          <button class="btn small quiet" type="button" id="s-full" aria-pressed="false" data-testid="fullscreen">Full screen</button>
+        </div>
+        <div class="banner needs" id="s-task" hidden data-testid="needs-card">
+          <div class="what">
+            <div class="task-text" id="s-task-text"></div>
+            <div class="hint">Do it in the page below, then press Done. Passwords go in the page, never in chat.</div>
+          </div>
+          <div class="buttons">
+            <button class="btn amber" type="button" data-act="carry-on" data-testid="carry-on">Done, carry on</button>
+            <button class="btn quiet" type="button" data-act="close" data-testid="close-needs">Close session</button>
+          </div>
+          <div class="phone" id="s-phone" hidden>
+            <span>On your phone instead?</span>
+            <span class="link" id="s-link" data-testid="share-link"></span>
+            <button class="btn small" type="button" data-act="copy" data-testid="copy-link">Copy link</button>
+          </div>
+        </div>
+        <div class="banner mine" id="s-paused" hidden data-testid="paused-note">You have the mouse: click and type right here. Homebrowser holds after its current step and picks up from what is on screen when you hand back.</div>
+        <div class="banner still" id="s-still-bar" hidden>
+          <span id="s-still-text"></span>
+          <button class="btn small" type="button" data-act="focus" id="s-focus" data-testid="show-live">Show it live</button>
+        </div>
+        <div class="viewport">
+          <div id="live" hidden data-testid="live-view"></div>
+          <input class="keys" id="s-keys" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type into the browser" data-testid="keyboard-input">
+          <img id="still" alt="" hidden data-testid="still-view">
+        </div>
+        <div class="now" id="s-now" data-testid="now" aria-live="polite">
+          <span class="dot"></span>
+          <span class="label" id="now-label"></span>
+          <span class="text" id="now-text"></span>
+          <span class="time elapsed" id="now-time"></span>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <aside class="convo" id="convo" hidden aria-label="Conversation">
+    <div class="convo-head">Conversation</div>
+    <div class="thread-wrap">
+      <div class="thread" id="s-thread" data-testid="thread"></div>
+      <button class="btn primary small jump" type="button" id="jump" hidden data-testid="jump">↓ Latest</button>
+    </div>
+    <form class="compose" id="s-compose">
+      <div class="needs-row" id="s-compose-needs" hidden>
+        <span>Done in the page? Homebrowser carries on from what is on screen.</span>
+        <button class="btn amber small" type="button" data-act="carry-on">Done, carry on</button>
+      </div>
+      <div class="pill">
+        <textarea id="reply" rows="1" aria-label="Message Homebrowser about this session" data-testid="reply"></textarea>
+        <button class="round" type="submit" id="s-send" data-testid="send" aria-label="Send"></button>
+      </div>
+      <span class="hint" id="s-compose-hint">Same tab, same conversation.</span>
+    </form>
+  </aside>
+</div>
+
+<script type="module">
+import RFB from '/viewer/core/rfb.js';
+
+// The entry for the browser itself, beside the sessions: it shows whatever tab is in front.
+const BROWSER = 'browser';
+const STATE_LABEL = { live: 'Live', needs: 'Needs you', working: 'Working', paused: 'Paused · you have the mouse', waiting: 'Waiting its turn', done: 'Finished', stopped: 'Stopped' };
+const GROUPS = [['Needs you', ['needs']], ['In progress', ['working', 'paused', 'waiting']], ['Earlier', ['done', 'stopped']]];
+const DONE_MESSAGE = 'I’m done, carry on';
+
+let sessions = [];
+let selected = decodeURIComponent(location.hash.slice(1)) || null;
+let status = {};
+let rfb = null;
+let threadSession = null;
+const detailsOpen = new Map();
+const $ = (id) => document.getElementById(id);
+
+async function api(method, path, body) {
+  const response = await fetch(path, {
+    method, credentials: 'same-origin',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) { location.reload(); throw new Error('Signed out of the console.'); }
+  if (!response.ok) throw new Error(data.error || `${response.status} ${response.statusText}`);
+  return data;
+}
+
+function showError(error) {
+  $('s-error').textContent = error.message;
+  $('s-error').hidden = false;
+}
+
+function current() { return sessions.find((s) => s.session === selected) || null; }
+// The live tab's site for a session whose tab is in front (the user may have
+// navigated it since the run), else the site its run was on.
+function title(s) { return (liveUrl(s) ? siteOf(liveUrl(s)) : s.site) || 'New session'; }
+function liveUrl(s) { return s.in_front && status.front_tab ? status.front_tab.url : null; }
+// The session that owns the tab in front, if any: then it is the one entry for that tab.
+function frontOwner() { return sessions.find((s) => s.in_front) || null; }
+function siteOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+function lastAsk(s) { return [...s.messages].reverse().find((m) => m.from === 'you')?.text || ''; }
+function setStatus(el, state) {
+  el.className = 'status ' + state;
+  el.lastElementChild.textContent = STATE_LABEL[state];
+}
+function totalSeconds(m) { return m.steps.reduce((sum, step) => sum + (step.seconds || 0), 0); }
+function firstLine(text) { return (text || '').split('\n').map((line) => line.trim()).find(Boolean) || ''; }
+function phaseOf(m) { return m.phase || { phase: 'starting', text: 'Getting the tab ready' }; }
+function why(reason) {
+  const span = document.createElement('span'); span.className = 'why';
+  span.innerHTML = '<b>Why:</b> ';
+  span.append(reason);
+  return span;
+}
+// A details element keeps its open state across re-renders; until the user toggles it, `fallback`.
+function keptDetails(className, key, fallback) {
+  const details = document.createElement('details');
+  details.className = className;
+  details.dataset.key = key;
+  details.open = detailsOpen.get(key) ?? fallback;
+  return details;
+}
+function setDrawer(open) { document.body.classList.toggle('drawer', open); showSidebarButton(); }
+
+// ------------------------------------------------------------- the list
+// The live preview: a small picture of the browser's screen, fetched again on every
+// refresh. One image element, reused, so the old picture stays until the new one loads.
+const preview = new Image();
+preview.alt = '';
+preview.dataset.testid = 'preview';
+let previewAt = 0;
+function livePreview() {
+  if (Date.now() - previewAt > 2500) {
+    previewAt = Date.now();
+    const next = new Image();
+    next.onload = () => { preview.src = next.src; };
+    next.src = `/v1/browser/screenshot?t=${previewAt}`;
+  }
+  return preview;
+}
+
+function browserItem() {
+  const tab = status.front_tab;
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'item';
+  item.dataset.session = BROWSER;
+  item.dataset.testid = 'browser-item';
+  item.setAttribute('aria-current', String(selected === BROWSER));
+  const thumb = document.createElement('span'); thumb.className = 'thumb'; thumb.append(livePreview());
+  const site = document.createElement('span'); site.className = 'site';
+  site.textContent = tab ? siteOf(tab.url) || tab.url : 'Browser';
+  const msg = document.createElement('span'); msg.className = 'msg'; msg.textContent = tab ? tab.title || tab.url : 'No tab open';
+  const st = document.createElement('span'); st.innerHTML = '<span class="dot"></span><span></span>'; setStatus(st, 'live');
+  item.append(thumb, site, msg, st);
+  return item;
+}
+
+function renderList() {
+  const groups = $('groups');
+  groups.replaceChildren();
+  if (!frontOwner()) {
+    const heading = document.createElement('div');
+    heading.className = 'group';
+    heading.textContent = 'Browser';
+    groups.append(heading, browserItem());
+  }
+  if (!sessions.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-list';
+    empty.textContent = 'No sessions yet.';
+    groups.append(empty);
+  }
+  for (const [name, states] of GROUPS) {
+    const members = sessions.filter((s) => states.includes(s.state));
+    if (!members.length) continue;
+    const heading = document.createElement('div');
+    heading.className = 'group';
+    heading.textContent = name;
+    groups.append(heading);
+    for (const s of members) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'item';
+      item.dataset.session = s.session;
+      item.dataset.testid = 'session-item';
+      item.dataset.state = s.state;
+      item.setAttribute('aria-current', String(s.session === selected));
+      const thumb = document.createElement('span');
+      thumb.className = 'thumb';
+      // A session whose tab is in front is what the live preview shows.
+      if (s.in_front) thumb.append(livePreview().cloneNode());
+      else if (s.shot_url) { const img = document.createElement('img'); img.src = s.shot_url; img.alt = ''; thumb.append(img); }
+      const site = document.createElement('span'); site.className = 'site'; site.textContent = title(s);
+      const msg = document.createElement('span'); msg.className = 'msg'; msg.textContent = lastAsk(s);
+      const st = document.createElement('span'); st.innerHTML = '<span class="dot"></span><span></span>'; setStatus(st, s.state);
+      item.append(thumb, site, msg, st);
+      groups.append(item);
+    }
+  }
+  $('drawer-needs').hidden = !sessions.some((s) => s.state === 'needs' && s.session !== selected);
+}
+
+// ------------------------------------------------------------- one session
+function actionButton(label, act, cls = '') {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn small ' + cls;
+  button.dataset.act = act;
+  button.dataset.testid = act;
+  button.textContent = label;
+  return button;
+}
+
+// A reply reads in the order it happened: the steps, then what Homebrowser said.
+function messageEl(m) {
+  const el = document.createElement('div');
+  const asking = m.from === 'homebrowser' && ['needs_user', 'needs_input'].includes(m.status);
+  el.className = 'm' + (m.from === 'you' ? ' you' : asking ? ' needs' : '');
+  el.dataset.testid = m.from === 'you' ? 'message-you' : 'message-homebrowser';
+  if (m.status) el.dataset.status = m.status;
+  const who = document.createElement('span'); who.className = 'who'; who.textContent = m.from === 'you' ? 'You' : 'Homebrowser';
+  el.append(who);
+  if (m.from === 'you') {
+    const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = m.text;
+    el.append(bubble);
+    return el;
+  }
+  const running = m.status === 'running';
+  if (running) el.dataset.phase = phaseOf(m).phase;
+  if (m.steps?.length) {
+    const details = keptDetails('steps' + (running ? ' running' : ''), m.run, running);
+    details.dataset.testid = 'steps';
+    const summary = document.createElement('summary');
+    const count = `${m.steps.length} step${m.steps.length === 1 ? '' : 's'}`;
+    summary.textContent = running ? `${count} · working` : `${count} · ${totalSeconds(m).toFixed(1)}s`;
+    const list = document.createElement('ol');
+    m.steps.forEach((step, index) => {
+      const li = document.createElement('li');
+      if (running && index === m.steps.length - 1) li.className = 'current';
+      li.textContent = step.observation || '';
+      const did = document.createElement('span'); did.className = 'did';
+      did.textContent = `${step.did || ''}${step.seconds ? ` · ${step.seconds}s` : ''}`;
+      li.append(did);
+      if (step.reason) li.append(why(step.reason));
+      if (step.thinking) {
+        const thinking = keptDetails('thinking', `${m.run}:${index}`, false);
+        const label = document.createElement('summary'); label.textContent = 'The model’s reasoning';
+        const text = document.createElement('div'); text.textContent = step.thinking;
+        thinking.append(label, text);
+        li.append(thinking);
+      }
+      list.append(li);
+    });
+    details.append(summary, list);
+    el.append(details);
+  }
+  if (m.status === 'queued' || running) {
+    const working = document.createElement('span');
+    working.className = 'working' + (m.status === 'queued' ? ' queued' : '');
+    working.innerHTML = '<span class="dot"></span><span></span>';
+    working.lastElementChild.textContent = m.status === 'queued'
+      ? 'Waiting for the browser. Homebrowser works on one session at a time.'
+      : m.paused ? 'Holding while you drive.' : `${phaseOf(m).text}…`;
+    if (running && !m.paused && phaseOf(m).reason) working.append(why(phaseOf(m).reason));
+    el.append(working);
+    return el;
+  }
+  const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = m.text || '(no reply)';
+  el.append(bubble);
+  if (m.files?.length) {
+    const files = document.createElement('div'); files.className = 'files';
+    for (const f of m.files) { const a = document.createElement('a'); a.href = f.url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = f.path; files.append(a); }
+    el.append(files);
+  }
+  const meta = document.createElement('span'); meta.className = 'meta';
+  meta.textContent = [m.status.replace('_', ' '), `${m.steps.length} step${m.steps.length === 1 ? '' : 's'}`, `$${m.cost_usd.toFixed(4)}`].join(' · ');
+  el.append(meta);
+  return el;
+}
+
+// The line under the screen: the newest thing that happened in it.
+function renderNow(s, busyElsewhere) {
+  const running = s.messages.findLast((m) => m.status === 'running');
+  const last = s.messages.findLast((m) => m.from === 'homebrowser');
+  let kind = 'done', label = STATE_LABEL[s.state], text = '', reason = '', time = '', since = null;
+  if (s.state === 'needs') {
+    kind = 'needs'; label = 'Waiting for you';
+    text = 'Do what the note above the page says, then press Done, carry on.';
+  } else if (s.state === 'paused') {
+    kind = 'paused'; label = 'Paused';
+    text = 'You have the mouse. Hand back to Homebrowser when you are done.';
+  } else if (s.state === 'waiting') {
+    kind = 'waiting';
+    text = busyElsewhere ? `The browser is working on ${title(busyElsewhere)} first.` : 'Starting soon.';
+  } else if (running) {
+    kind = 'working';
+    const phase = phaseOf(running);
+    label = `Step ${running.steps.length + 1}`;
+    text = `${phase.text}…`;
+    reason = phase.reason || '';
+    since = phase.since_ms;
+  } else if (last) {
+    text = firstLine(last.text);
+    if (last.steps.length) time = `${totalSeconds(last).toFixed(1)}s`;
+  }
+  $('s-now').className = 'now ' + kind;
+  $('now-label').textContent = label;
+  $('now-text').replaceChildren(text);
+  if (reason) $('now-text').append(' ', why(reason));
+  const clock = $('now-time');
+  if (since) clock.dataset.since = since; else delete clock.dataset.since;
+  clock.textContent = time;
+  clock.title = since ? 'Time on this part of the step' : 'Time the run took';
+  tick();
+}
+// Ticks every element that counts up from a server time (milliseconds).
+function tick() {
+  for (const el of document.querySelectorAll('[data-since]')) {
+    const seconds = Math.max(0, Math.round((Date.now() - Number(el.dataset.since)) / 1000));
+    el.textContent = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
+}
+setInterval(tick, 1000);
+
+function nearBottom(thread) { return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 60; }
+function toLatest(smooth) {
+  const thread = $('s-thread');
+  thread.scrollTo({ top: thread.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+  $('jump').hidden = true;
+}
+
+function renderThread(s) {
+  const thread = $('s-thread');
+  const switched = threadSession !== s.session;
+  const follow = switched || nearBottom(thread);
+  const before = thread.scrollHeight;
+  thread.replaceChildren(...s.messages.map(messageEl));
+  threadSession = s.session;
+  if (follow) toLatest(false);
+  else if (thread.scrollHeight > before) $('jump').hidden = false;
+}
+
+// The tab in front, live, whoever is driving it: a session, the user, or another
+// program over CDP (a scraper's tab never shows up as a session).
+function renderBrowser() {
+  const tab = status.front_tab;
+  const busy = sessions.find((s) => ['working', 'paused'].includes(s.state));
+  $('app').classList.remove('empty');
+  $('welcome').hidden = true;
+  $('session').hidden = false;
+  $('convo').hidden = false;
+  if (threadSession !== BROWSER) {
+    const hint = document.createElement('div');
+    hint.className = 'thread-hint';
+    hint.dataset.testid = 'browser-hint';
+    hint.textContent = 'Ask Homebrowser to do something in this tab. It works in the tab you see, and you can watch it here.';
+    $('s-thread').replaceChildren(hint);
+    threadSession = BROWSER;
+  }
+  $('s-title').textContent = tab ? siteOf(tab.url) || tab.url : 'Browser';
+  setStatus($('s-status'), 'live');
+  $('s-asked').textContent = tab?.title || '';
+  $('s-asked').title = tab?.title || '';
+  $('s-actions').replaceChildren();
+  for (const id of ['s-task', 's-compose-needs', 's-paused', 's-still-bar', 's-driving', 'still']) $(id).hidden = true;
+  $('s-browser').classList.remove('mine', 'needs');
+  $('s-tag').className = 'tag live';
+  $('s-tag').lastElementChild.textContent = 'Live';
+  // Yours to click and type in, unless a run is driving the tab in front.
+  const driven = sessions.some((other) => other.state === 'working' && other.in_front);
+  showUrl(tab?.url || '', Boolean(tab) && !driven);
+  $('live').hidden = false;
+  $('s-driving').hidden = driven;
+  connectLive(driven);
+  $('s-now').className = 'now ' + (busy ? 'working' : 'done');
+  $('now-label').textContent = busy ? 'Homebrowser is working' : 'In front';
+  $('now-text').replaceChildren(busy ? `on ${title(busy)}.` : 'Whatever the browser shows, including programs that drive it over CDP.');
+  const clock = $('now-time');
+  delete clock.dataset.since;
+  clock.textContent = '';
+  $('s-compose-needs').hidden = true;
+  $('reply').placeholder = tab ? 'Ask Homebrowser to do something in this tab…' : 'No tab open';
+  renderBrowserSend();
+}
+
+function renderBrowserSend() {
+  const button = $('s-send');
+  button.innerHTML = ARROW;
+  button.className = 'round';
+  button.disabled = !$('reply').value.trim() || !status.front_tab;
+  button.dataset.testid = 'send';
+  button.setAttribute('aria-label', 'Send');
+  button.title = '';
+  const owner = sessions.find((s) => status.front_tab && s.tab === status.front_tab.id);
+  $('s-compose-hint').textContent = owner ? `Continues the session on ${title(owner)}.` : 'Starts a session in this tab.';
+}
+
+function renderSession() {
+  if (selected === BROWSER) { renderBrowser(); return; }
+  const s = current();
+  $('app').classList.toggle('empty', !s);
+  $('welcome').hidden = Boolean(s);
+  $('session').hidden = !s;
+  $('convo').hidden = !s;
+  if (!s) { threadSession = null; return; }
+  const busyElsewhere = sessions.find((other) => other.session !== s.session && ['working', 'paused'].includes(other.state));
+  $('s-title').textContent = title(s);
+  setStatus($('s-status'), s.state);
+  $('s-asked').textContent = lastAsk(s) ? `“${lastAsk(s)}”` : '';
+  $('s-asked').title = lastAsk(s);
+
+  const actions = $('s-actions');
+  actions.replaceChildren();
+  if (s.state === 'working') actions.append(actionButton('Take over', 'pause'), actionButton('Stop', 'cancel', 'quiet'));
+  if (s.state === 'paused') actions.append(actionButton('Hand back to Homebrowser', 'resume', 'primary'), actionButton('Stop', 'cancel', 'quiet'));
+  if (s.state === 'waiting') actions.append(actionButton('Stop', 'cancel', 'quiet'));
+  if (['done', 'stopped'].includes(s.state)) actions.append(actionButton('Close session', 'close', 'quiet'));
+
+  const needs = s.state === 'needs';
+  $('s-task').hidden = !needs;
+  $('s-compose-needs').hidden = !needs;
+  if (needs) {
+    $('s-task-text').textContent = s.task || '';
+    $('s-phone').hidden = !s.needs_user;
+    $('s-link').textContent = s.needs_user?.share_url || '';
+  }
+  $('s-paused').hidden = s.state !== 'paused';
+
+  // The live view shows whatever tab is in front. A run at work keeps its tab there;
+  // otherwise use it when this session's tab is in front, or when there is no
+  // screenshot of the session to show yet (a blank panel looks like a dead screen).
+  const driving = ['working', 'paused'].includes(s.state);
+  const live = s.in_front || driving || !s.shot_url;
+  const interactive = (s.in_front || driving) && ['needs', 'paused', 'done', 'stopped'].includes(s.state);
+  $('s-browser').classList.toggle('mine', interactive && !needs);
+  $('s-browser').classList.toggle('needs', needs);
+  $('s-driving').hidden = !interactive || needs || s.state === 'paused';
+  const tag = $('s-tag');
+  tag.className = 'tag' + (live ? ' live' : '');
+  tag.lastElementChild.textContent = !live ? 'Last screenshot' : s.in_front || driving ? 'Live' : 'Live · another tab in front';
+  showUrl(liveUrl(s) || s.url || 'about:blank', Boolean(s.tab) && !['working', 'waiting'].includes(s.state));
+  $('live').hidden = !live;
+  if (!live) $('s-keyboard').hidden = true;
+  $('still').hidden = live || !s.shot_url;
+  if (!live && s.shot_url && $('still').getAttribute('src') !== s.shot_url) $('still').src = s.shot_url;
+  $('still').alt = `Last screenshot of ${title(s)}`;
+  $('s-still-bar').hidden = live || !s.url;
+  $('s-focus').disabled = Boolean(busyElsewhere);
+  $('s-still-text').textContent = busyElsewhere
+    ? `The browser is working on ${title(busyElsewhere)}. The live view comes back when it is done.`
+    : 'Showing the last screenshot. Bring this tab to the front to see it live.';
+  if (live) connectLive(!interactive);
+
+  renderNow(s, busyElsewhere);
+  renderThread(s);
+  $('reply').placeholder = needs ? 'e.g. I signed in with Google, carry on' : s.state === 'working' || s.state === 'waiting' ? 'Message Homebrowser about this tab…' : 'e.g. Now sort by price';
+  renderSend(s);
+}
+
+const ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+
+// While a run is going and the box is empty, the button stops the run; typing turns it back into send, which queues.
+function renderSend(s) {
+  const typed = $('reply').value.trim().length > 0;
+  const stop = Boolean(s.running_run) && !typed;
+  const button = $('s-send');
+  button.innerHTML = stop ? '<span class="square"></span>' : ARROW;
+  button.className = 'round' + (stop && s.stopping ? ' stopping' : '');
+  button.disabled = stop ? s.stopping : !typed;
+  button.dataset.testid = stop ? 'stop' : 'send';
+  button.setAttribute('aria-label', stop ? 'Stop' : 'Send');
+  button.title = stop ? 'Stop (Esc)' : '';
+  $('s-compose-hint').textContent = s.stopping ? 'Stopping after the current step.'
+    : !s.running_run ? 'Same tab, same conversation.'
+    : typed ? 'Queues behind what it is doing now.' : '■ stops it. Type to queue a message instead.';
+}
+
+// The address bar shows the tab's address; type over it and press Enter to go
+// somewhere else. Not while a run is driving that tab: pause or stop it first.
+function showUrl(text, editable) {
+  const input = $('s-url');
+  if (document.activeElement !== input) input.value = text;
+  input.readOnly = !editable;
+  input.title = editable ? 'Type an address or a search, then press Enter'
+    : 'Homebrowser is driving this tab. Take over or stop it to type an address.';
+}
+$('s-url').addEventListener('focus', () => { if (!$('s-url').readOnly) $('s-url').select(); });
+
+// Suggestions from the browser's own history as you type, and the top address
+// completed in place (selected, so typing on replaces it), as Chrome's address bar does.
+let suggestions = [];
+let suggestIndex = -1;
+let suggestTimer = null;
+let typedText = '';
+function showSuggestions(items) {
+  suggestions = items;
+  suggestIndex = -1;
+  const list = $('s-suggest');
+  list.replaceChildren(...items.map((item, index) => {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    li.dataset.index = String(index);
+    const address = document.createElement('span'); address.className = 'address'; address.textContent = item.address;
+    const pageTitle = document.createElement('span'); pageTitle.className = 'page-title'; pageTitle.textContent = item.title || '';
+    li.append(address, pageTitle);
+    return li;
+  }));
+  list.hidden = !items.length;
+  $('s-url').setAttribute('aria-expanded', String(Boolean(items.length)));
+}
+function hideSuggestions() { clearTimeout(suggestTimer); showSuggestions([]); }
+function highlight(index) {
+  suggestIndex = index;
+  [...$('s-suggest').children].forEach((li, i) => li.setAttribute('aria-selected', String(i === index)));
+  if (index >= 0) $('s-url').value = suggestions[index].address;
+}
+async function suggest(complete) {
+  const input = $('s-url');
+  const text = input.value.slice(0, input.selectionStart);
+  typedText = text;
+  if (!text.trim()) { hideSuggestions(); return; }
+  let found;
+  try { ({ suggestions: found } = await api('GET', `/v1/browser/history?q=${encodeURIComponent(text)}`)); }
+  catch (error) { showError(error); return; }
+  if (document.activeElement !== input || typedText !== text) return;
+  showSuggestions(found);
+  const top = found[0];
+  if (complete && top && top.address.toLowerCase().startsWith(text.toLowerCase())) {
+    input.value = text + top.address.slice(text.length);
+    input.setSelectionRange(text.length, input.value.length);
+  }
+}
+$('s-url').addEventListener('input', (event) => {
+  clearTimeout(suggestTimer);
+  // Deleting does not complete again, or Backspace could never shorten the address.
+  const complete = !event.inputType?.startsWith('delete');
+  suggestTimer = setTimeout(() => suggest(complete), 120);
+});
+$('s-url').addEventListener('keydown', (event) => {
+  const open = !$('s-suggest').hidden;
+  if (event.key === 'ArrowDown' && open) { event.preventDefault(); highlight(Math.min(suggestIndex + 1, suggestions.length - 1)); }
+  else if (event.key === 'ArrowUp' && open) { event.preventDefault(); highlight(Math.max(suggestIndex - 1, -1)); if (suggestIndex < 0) $('s-url').value = typedText; }
+  else if (event.key === 'Escape') { event.preventDefault(); if (open) hideSuggestions(); else { $('s-url').blur(); render(); } }
+});
+$('s-suggest').addEventListener('mousedown', (event) => {
+  const li = event.target.closest('li');
+  if (!li) return;
+  event.preventDefault();
+  $('s-url').value = suggestions[Number(li.dataset.index)].address;
+  hideSuggestions();
+  $('s-url-form').requestSubmit();
+});
+$('s-url').addEventListener('blur', hideSuggestions);
+$('s-url-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const input = $('s-url');
+  hideSuggestions();
+  if (input.readOnly || !input.value.trim()) return;
+  $('s-error').hidden = true;
+  try {
+    const { url } = await api('POST', '/v1/browser/navigate', { url: input.value, session: selected === BROWSER ? null : selected });
+    input.value = url;
+    input.blur();
+  } catch (error) { showError(error); }
+  await refresh();
+});
+
+// Full screen: the browser's own where it has one for an element; iPhone Safari
+// has none, so there the frame covers the window instead.
+function fullScreenOn() {
+  return Boolean(document.fullscreenElement || document.webkitFullscreenElement) || document.body.classList.contains('expanded');
+}
+// Chrome on a Mac turns element full screen into the window's own, animated; while
+// that runs it can refuse to leave, so a refused request is tried again.
+async function leaveFullScreen() {
+  for (let attempt = 0; attempt < 10 && (document.fullscreenElement || document.webkitFullscreenElement); attempt++) {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else document.webkitExitFullscreen();
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+}
+function showFullScreen() {
+  const on = fullScreenOn();
+  $('s-full').textContent = on ? 'Exit full screen' : 'Full screen';
+  $('s-full').setAttribute('aria-pressed', String(on));
+}
+$('s-full').addEventListener('click', async () => {
+  const frame = $('s-browser');
+  if (fullScreenOn()) {
+    await leaveFullScreen();
+    document.body.classList.remove('expanded');
+  } else if (frame.requestFullscreen) {
+    await frame.requestFullscreen().catch(() => document.body.classList.add('expanded'));
+  } else if (frame.webkitRequestFullscreen) {
+    frame.webkitRequestFullscreen();
+  } else {
+    document.body.classList.add('expanded');
+  }
+  showFullScreen();
+});
+document.addEventListener('fullscreenchange', showFullScreen);
+document.addEventListener('webkitfullscreenchange', showFullScreen);
+
+// One sidebar button at the left of the header: on a wide screen it collapses the
+// sessions column (this browser remembers it); on a narrow one it opens them as a drawer.
+const NARROW = window.matchMedia('(max-width: 1100px)');
+const RAIL_KEY = 'homebrowser.sessionsHidden';
+function sidebarShown() {
+  return NARROW.matches ? document.body.classList.contains('drawer') : !document.body.classList.contains('rail-hidden');
+}
+function showSidebarButton() {
+  const label = sidebarShown() ? 'Hide sidebar' : 'Show sidebar';
+  $('sidebar-toggle').title = label;
+  $('sidebar-toggle').setAttribute('aria-label', label);
+  $('sidebar-toggle').setAttribute('aria-expanded', String(sidebarShown()));
+}
+function setRail(hidden) {
+  document.body.classList.toggle('rail-hidden', hidden);
+  try { localStorage.setItem(RAIL_KEY, hidden ? '1' : '0'); } catch { /* private window: not remembered */ }
+  showSidebarButton();
+}
+let railHidden = false;
+try { railHidden = localStorage.getItem(RAIL_KEY) === '1'; } catch { /* private window */ }
+setRail(railHidden);
+$('sidebar-toggle').addEventListener('click', () => {
+  if (NARROW.matches) setDrawer(!document.body.classList.contains('drawer'));
+  else setRail(!document.body.classList.contains('rail-hidden'));
+});
+NARROW.addEventListener('change', showSidebarButton);
+
+// Touch screens have no physical keyboard and only show one for a text field, so
+// the keyboard button focuses a hidden field and sends what is typed into it.
+const TOUCH = window.matchMedia('(pointer: coarse)');
+const KEYSYMS = { Backspace: 0xff08, Enter: 0xff0d, Tab: 0xff09, Escape: 0xff1b, ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54 };
+function keysym(character) {
+  const code = character.codePointAt(0);
+  return code < 0x100 ? code : 0x01000000 + code;
+}
+$('s-keyboard').addEventListener('click', () => {
+  const keys = $('s-keys');
+  if (document.activeElement === keys) { keys.blur(); return; }
+  keys.focus();
+});
+$('s-keys').addEventListener('focus', () => $('s-keyboard').setAttribute('aria-pressed', 'true'));
+$('s-keys').addEventListener('blur', () => $('s-keyboard').setAttribute('aria-pressed', 'false'));
+$('s-keys').addEventListener('keydown', (event) => {
+  if (!rfb || rfb.viewOnly || !(event.key in KEYSYMS)) return;
+  event.preventDefault();
+  rfb.sendKey(KEYSYMS[event.key], event.key);
+});
+$('s-keys').addEventListener('input', () => {
+  const keys = $('s-keys');
+  if (rfb && !rfb.viewOnly) for (const character of keys.value) rfb.sendKey(keysym(character), null);
+  keys.value = '';
+});
+
+function connectLive(viewOnly) {
+  if (!rfb) {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    rfb = new RFB($('live'), `${scheme}://${location.host}/viewer/websockify`);
+    rfb.scaleViewport = true;
+    rfb.background = 'transparent';
+    rfb.addEventListener('connect', () => { $('live').dataset.connected = 'true'; });
+    rfb.addEventListener('disconnect', () => { $('live').dataset.connected = 'false'; rfb = null; setTimeout(renderSession, 2000); });
+  }
+  rfb.viewOnly = viewOnly;
+  $('live').dataset.viewOnly = String(viewOnly);
+  $('s-keyboard').hidden = viewOnly || !TOUCH.matches;
+}
+
+function render() {
+  if (selected && selected !== BROWSER && !current()) selected = null;
+  // One entry per tab: when a session owns the tab in front, the Browser view is that session.
+  if (selected === BROWSER && frontOwner()) selected = frontOwner().session;
+  // A session that needs the user, then one at work; otherwise the live browser,
+  // not a finished session whose screen is long gone.
+  if (!selected) {
+    const shown = sessions.find((s) => s.state === 'needs')
+      || sessions.find((s) => ['working', 'paused', 'waiting'].includes(s.state));
+    selected = shown ? shown.session : BROWSER;
+  }
+  if (selected && location.hash.slice(1) !== selected) history.replaceState(null, '', '#' + selected);
+  renderList();
+  renderSession();
+}
+
+// ------------------------------------------------------------- data
+async function refresh() {
+  try {
+    [status, { sessions }] = await Promise.all([api('GET', '/v1/status'), api('GET', '/v1/sessions')]);
+  } catch (error) { showError(error); return; }
+  $('browser-dot').style.background = status.browser_connected ? 'var(--ok)' : 'var(--wait)';
+  $('browser-text').textContent = status.browser_connected ? 'Browser ready' : 'Browser not connected yet';
+  render();
+}
+
+let pending = null;
+function soon() { clearTimeout(pending); pending = setTimeout(refresh, 250); }
+
+function setLive(on) {
+  $('events-dot').style.background = on ? 'var(--ok)' : 'var(--wait)';
+  $('events-text').textContent = on ? 'Live updates on' : 'Reconnecting…';
+}
+
+// A long poll, not EventSource: Cloudflare quick tunnels hold a Server-Sent
+// Events response until it ends, so the share link would never see an event.
+async function listen() {
+  let since = null;
+  for (;;) {
+    try {
+      const data = await api('GET', since === null ? '/v1/events/next' : `/v1/events/next?since=${since}`);
+      setLive(true);
+      if (since !== null && (data.events.length || data.gap)) soon();
+      since = data.last_id;
+    } catch (error) {
+      setLive(false);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+}
+
+async function act(name, s) {
+  $('s-error').hidden = true;
+  const run = s.running_run;
+  if (name === 'pause' || name === 'resume' || name === 'cancel') await api('POST', `/v1/runs/${run}/${name}`);
+  if (name === 'close') { await api('POST', `/v1/sessions/${s.session}/close`); selected = null; }
+  if (name === 'focus') await api('POST', `/v1/sessions/${s.session}/focus`);
+  if (name === 'carry-on') await api('POST', '/v1/chat', { message: DONE_MESSAGE, session: s.session, wait: false });
+  await refresh();
+}
+
+$('groups').addEventListener('click', (event) => {
+  const item = event.target.closest('[data-session]');
+  if (!item) return;
+  selected = item.dataset.session;
+  $('s-error').hidden = true;
+  setDrawer(false);
+  render();
+});
+
+async function onAction(event) {
+  const button = event.target.closest('[data-act]');
+  const s = current();
+  if (!button || !s) return;
+  if (button.dataset.act === 'copy') {
+    const text = $('s-link').textContent;
+    const done = () => { button.textContent = 'Copied'; };
+    try { await navigator.clipboard.writeText(text); done(); }
+    catch { getSelection().selectAllChildren($('s-link')); button.textContent = 'Selected: press Copy'; }
+    return;
+  }
+  button.disabled = true;
+  try { await act(button.dataset.act, s); } catch (error) { showError(error); } finally { button.disabled = false; }
+}
+$('session').addEventListener('click', onAction);
+$('convo').addEventListener('click', onAction);
+
+// Remember a list the user opened or closed; otherwise the running steps are open.
+$('s-thread').addEventListener('click', (event) => {
+  const summary = event.target.closest('summary');
+  if (summary) detailsOpen.set(summary.parentElement.dataset.key, !summary.parentElement.open);
+});
+$('s-thread').addEventListener('scroll', () => { if (nearBottom($('s-thread'))) $('jump').hidden = true; });
+$('jump').addEventListener('click', () => toLatest(true));
+
+$('s-compose').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = $('reply').value.trim();
+  if (selected === BROWSER) {
+    // The tab in front: its own session if it has one, otherwise a new session in it.
+    const tab = status.front_tab;
+    if (!text || !tab) return;
+    const owner = sessions.find((other) => other.tab === tab.id);
+    try {
+      const run = await api('POST', '/v1/chat', owner ? { message: text, session: owner.session, wait: false }
+        : { message: text, tab: tab.id, wait: false });
+      $('reply').value = '';
+      selected = run.session;
+      threadSession = null;
+      await refresh();
+    } catch (error) { showError(error); }
+    return;
+  }
+  const s = current();
+  if (!s) return;
+  if (!text) {
+    if (!s.running_run || s.stopping) return;
+    try { await act('cancel', s); } catch (error) { showError(error); }
+    return;
+  }
+  try {
+    await api('POST', '/v1/chat', { message: text, session: s.session, wait: false });
+    $('reply').value = '';
+    threadSession = null;
+    await refresh();
+  } catch (error) { showError(error); }
+});
+$('reply').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('s-compose').requestSubmit(); }
+  if (event.key === 'Escape' && !$('reply').value.trim()) { event.preventDefault(); $('s-compose').requestSubmit(); }
+});
+$('reply').addEventListener('input', () => {
+  if (selected === BROWSER) renderBrowserSend();
+  else if (current()) renderSend(current());
+});
+
+$('new-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = $('new-message').value.trim();
+  if (!text) return;
+  try {
+    const run = await api('POST', '/v1/chat', { message: text, wait: false });
+    $('new-message').value = '';
+    selected = run.session;
+    setDrawer(false);
+    await refresh();
+  } catch (error) { selected = null; render(); showError(error); }
+});
+
+// ------------------------------------------------------------- devices
+const shortDate = (iso) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+async function showDevices() {
+  const { devices } = await api('GET', '/v1/devices');
+  $('device-list').replaceChildren(...devices.map((d) => {
+    const row = document.createElement('div');
+    row.className = 'device';
+    row.dataset.testid = 'device';
+    const what = document.createElement('div'); what.className = 'what';
+    const label = document.createElement('b'); label.textContent = d.label;
+    const when = document.createElement('span'); when.textContent = `Signed in ${shortDate(d.signed_in)} · until ${shortDate(d.expires)}`;
+    what.append(label, when);
+    row.append(what);
+    if (d.current) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = 'This device'; row.append(tag); }
+    const out = document.createElement('button');
+    out.type = 'button'; out.className = 'btn'; out.textContent = 'Sign out'; out.dataset.device = d.device;
+    row.append(out);
+    return row;
+  }));
+  if (!$('devices').open) $('devices').showModal();
+}
+
+function setPasswordForm(open) {
+  $('password-form').reset();
+  $('password-form').hidden = !open;
+  $('password-closed').hidden = open;
+  $('password-error').hidden = true;
+  // Clears the meter and the match check the reset left behind.
+  $('password').dispatchEvent(new Event('input'));
+  if (open) { $('password-saved').hidden = true; $('current-password').focus(); }
+}
+
+$('devices-open').addEventListener('click', () => { setPasswordForm(false); $('password-saved').hidden = true; showDevices().catch(showError); });
+$('devices-close').addEventListener('click', () => $('devices').close());
+$('password-open').addEventListener('click', () => setPasswordForm(true));
+$('password-cancel').addEventListener('click', () => setPasswordForm(false));
+$('password-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = new FormData($('password-form'));
+  const save = $('password-form').querySelector('button[type=submit]');
+  save.disabled = true;
+  try {
+    await api('POST', '/v1/password', { current: form.get('current'), password: form.get('password'), again: form.get('again') });
+    setPasswordForm(false);
+    $('password-saved').hidden = false;
+    await showDevices();
+  } catch (error) {
+    $('password-error').textContent = error.message;
+    $('password-error').hidden = false;
+    save.disabled = false;
+  }
+});
+$('device-list').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-device]');
+  if (!button) return;
+  button.disabled = true;
+  // Signing out this device makes the next call a 401, which reloads to the sign-in page.
+  try { await api('POST', `/v1/devices/${button.dataset.device}/sign-out`); await showDevices(); }
+  catch (error) { $('devices').close(); showError(error); }
+});
+$('sign-out-everywhere').addEventListener('click', async () => {
+  await api('POST', '/v1/devices/sign-out-everywhere').catch(showError);
+  location.reload();
+});
+
+$('scrim').addEventListener('click', () => setDrawer(false));
+document.querySelector('[data-open-drawer]').addEventListener('click', () => { setDrawer(true); $('new-message').focus(); });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  setDrawer(false);
+  if (document.body.classList.contains('expanded')) { document.body.classList.remove('expanded'); showFullScreen(); }
+});
+
+// After the setup page or a password link: say what was saved, once.
+const SAVED = {
+  setup: '<b>Homebrowser is set up.</b> OpenRouter accepted the key, and this browser is signed in to the console for 30 days.',
+  password: '<b>Password saved.</b> Every other device is signed out. This one is signed in for 30 days.',
+};
+const saved = new URLSearchParams(location.search).get('saved');
+if (SAVED[saved]) {
+  $('notice-text').innerHTML = SAVED[saved];
+  $('notice').hidden = false;
+}
+if (saved) history.replaceState(null, '', location.pathname + location.hash);
+$('notice-close').addEventListener('click', () => { $('notice').hidden = true; });
+
+// Fetch first: a link to a session that started since the last refresh (a hand-off) is not in the list yet.
+window.addEventListener('hashchange', () => { selected = decodeURIComponent(location.hash.slice(1)) || null; refresh(); });
+listen();
+refresh();
+// Which tab is in front changes with no event (another program switching tabs or
+// navigating, the user clicking in the viewer), so poll while the console is visible.
+setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+</script>
+</body>
+</html>

@@ -1,0 +1,218 @@
+diff --git a/chrome/browser/devtools/BUILD.gn b/chrome/browser/devtools/BUILD.gn
+index 2e694986c7..534262430c 100644
+--- a/chrome/browser/devtools/BUILD.gn
++++ b/chrome/browser/devtools/BUILD.gn
+@@ -132,6 +132,7 @@ static_library("devtools") {
+     "//chrome/browser/ui/browser_window:create_browser_window",
+     "//chrome/browser/ui/dialogs",
+     "//chrome/browser/ui/select_file_policy",
++    "//components/fury",
+     "//components/page_load_metrics/browser",
+     "//components/page_load_metrics/browser/observers/ad_metrics",
+ 
+diff --git a/chrome/browser/devtools/devtools_availability_checker.cc b/chrome/browser/devtools/devtools_availability_checker.cc
+index 19a9f4d762..03df037c2a 100644
+--- a/chrome/browser/devtools/devtools_availability_checker.cc
++++ b/chrome/browser/devtools/devtools_availability_checker.cc
+@@ -7,6 +7,8 @@
+ #include <string>
+ 
+ #include "base/check.h"
++#include "base/command_line.h"
++#include "components/fury/fury_switches.h"
+ #include "base/feature_list.h"
+ #include "base/notreached.h"
+ #include "base/types/expected.h"
+@@ -89,8 +91,35 @@ bool IsRestrictedExtension(const extensions::Extension* extension,
+ 
+ }  // namespace
+ 
++namespace {
++
++// Patch 0302, and the guard that closes the hole the first version left.
++//
++// Locking DeveloperToolsPolicyHandler::GetEffectiveAvailability alone is not
++// enough, and the way it fails is worth stating exactly because it looked
++// finished. Forcing kDisallowed sends IsInspectionAllowed into the arm at the
++// bottom of this file which, when no specific context is given, reads
++// prefs::kDeveloperToolsAvailabilityAllowlist STRAIGHT off the profile and
++// returns true if it is non-empty — not through the policy checker, so neither
++// of the other two guards is on that path. That preference lives in the
++// Preferences JSON inside the user-data-dir, which is the one file a restricted
++// operator is guaranteed to have. One line in it and the devtools:// resources
++// load again.
++//
++// So the answer is asked here, at the five entry points every caller in
++// //chrome and //content funnels through, before any preference is consulted.
++bool FuryDevToolsLocked() {
++  return base::CommandLine::ForCurrentProcess()->HasSwitch(
++      fury::switches::kLockDevTools);
++}
++
++}  // namespace
++
+ bool IsInspectionAllowed(Profile* profile,
+                          content::DevToolsAgentHost* agent_host) {
++  if (FuryDevToolsLocked()) {
++    return false;
++  }
+   if (base::FeatureList::IsEnabled(features::kDevToolsTargetLevelEvaluation)) {
+     GURL target_url = agent_host->GetURL();
+     if (!IsInspectionAllowed(profile, target_url)) {
+@@ -126,6 +155,9 @@ bool IsInspectionAllowed(Profile* profile,
+ }
+ 
+ bool IsInspectionAllowed(Profile* profile, content::WebContents* web_contents) {
++  if (FuryDevToolsLocked()) {
++    return false;
++  }
+   if (!web_contents) {
+     // For contexts without web_contents, we can only check the general policy.
+     return IsInspectionAllowed(
+@@ -228,6 +260,9 @@ bool IsInspectionAllowed(Profile* profile, content::WebContents* web_contents) {
+ 
+ bool IsInspectionAllowed(Profile* profile,
+                          const extensions::Extension* extension) {
++  if (FuryDevToolsLocked()) {
++    return false;
++  }
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+   policy::DeveloperToolsPolicyChecker* checker =
+       policy::DeveloperToolsPolicyCheckerFactory::GetForBrowserContext(profile);
+@@ -286,6 +321,9 @@ bool IsInspectionAllowed(Profile* profile,
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+ bool IsInspectionAllowed(Profile* profile, const web_app::WebApp* web_app) {
++  if (FuryDevToolsLocked()) {
++    return false;
++  }
+   if (web_app) {
+     policy::DeveloperToolsPolicyChecker* checker =
+         policy::DeveloperToolsPolicyCheckerFactory::GetForBrowserContext(
+diff --git a/chrome/browser/policy/BUILD.gn b/chrome/browser/policy/BUILD.gn
+index 717b5c19ad..e9eba0849d 100644
+--- a/chrome/browser/policy/BUILD.gn
++++ b/chrome/browser/policy/BUILD.gn
+@@ -1231,6 +1231,7 @@ source_set("impl") {
+     ":path_parser",
+     ":policy_util",
+     "//chrome/browser:browser_features",
++    "//components/fury",
+     "//chrome/browser:browser_process_platform_part",
+     "//chrome/browser/bookmarks",
+     "//chrome/browser/browsing_data",
+diff --git a/chrome/browser/policy/developer_tools_policy_checker.cc b/chrome/browser/policy/developer_tools_policy_checker.cc
+index 84200574f3..c9a89ec075 100644
+--- a/chrome/browser/policy/developer_tools_policy_checker.cc
++++ b/chrome/browser/policy/developer_tools_policy_checker.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "chrome/browser/policy/developer_tools_policy_checker.h"
+ 
++#include "base/command_line.h"
++#include "components/fury/fury_switches.h"
++
+ #include "build/build_config.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_keyed_service_factory.h"
+@@ -39,6 +42,17 @@ base::CallbackListSubscription DeveloperToolsPolicyChecker::AddObserver(
+ DeveloperToolsPolicyChecker::DevToolsAvailability
+ DeveloperToolsPolicyChecker::GetDevToolsAvailabilityForUrl(
+     const GURL& url) const {
++  // Patch 0302, and the half that is easy to miss. The allowlist branch three
++  // lines below answers kAllowed for a URL in the allowlist, and
++  // IsInspectionAllowed then returns true — so locking only
++  // GetEffectiveAvailability leaves a per-URL hole that a profile with an
++  // allowlist preference walks straight through. Both decision points, or
++  // neither.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          fury::switches::kLockDevTools)) {
++    return DevToolsAvailability::kDisallowed;
++  }
++
+   URLBlocklist::URLBlocklistState url_state =
+       url_blocklist_manager_.GetURLBlocklistState(url);
+   if (url_state == URLBlocklist::URLBlocklistState::URL_IN_ALLOWLIST) {
+diff --git a/chrome/browser/policy/developer_tools_policy_handler.cc b/chrome/browser/policy/developer_tools_policy_handler.cc
+index 18b0bd47fa..e105f518d3 100644
+--- a/chrome/browser/policy/developer_tools_policy_handler.cc
++++ b/chrome/browser/policy/developer_tools_policy_handler.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/policy/developer_tools_policy_handler.h"
+ 
++#include "components/fury/fury_switches.h"
++
+ #include <optional>
+ 
+ #include "base/command_line.h"
+@@ -293,6 +295,25 @@ void DeveloperToolsPolicyHandler::ApplyPolicySettings(const PolicyMap& policies,
+ 
+ policy::DeveloperToolsAvailability
+ DeveloperToolsPolicyHandler::GetEffectiveAvailability(Profile* profile) {
++  // Patch 0302. First statement in the function, and before the ChromeOS
++  // kForceDevToolsAvailable block below, so that nothing can hand the
++  // availability back after the lock has taken it away.
++  //
++  // This is what makes LaunchRestrictions::lock_devtools a technical
++  // restriction rather than a hidden button. Until this patch,
++  // agent/src/launcher.rs pushed --fury-lock-devtools on every restricted
++  // launch and nothing in the browser read it: the operator the RBAC model
++  // says must not be able to read a profile's cookies could open DevTools and
++  // read them.
++  //
++  // Enforced at the READ rather than by seeding prefs::kDevToolsAvailability,
++  // because that preference lives in the Preferences JSON inside the profile
++  // directory — which the operator has, and can edit between launches.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          fury::switches::kLockDevTools)) {
++    return DeveloperToolsAvailability::kDisallowed;
++  }
++
+ #if BUILDFLAG(IS_CHROMEOS)
+   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+   if (command_line->HasSwitch(ash::switches::kForceDevToolsAvailable)) {
+diff --git a/components/fury/fury_switches.cc b/components/fury/fury_switches.cc
+index 689f3b74d8..c42d598a2c 100644
+--- a/components/fury/fury_switches.cc
++++ b/components/fury/fury_switches.cc
+@@ -11,5 +11,10 @@ const char kFingerprintFd[] = "fury-fp-fd";
+ const char kFingerprintFileHandle[] = "fury-fp-file-handle";
+ const char kFingerprintHandle[] = "fury-fp-handle";
+ 
++// Must match agent/src/launcher.rs. Nothing in either language checks the other,
++// so verify-0302.py launches with the Rust spelling and asserts the browser
++// refuses — a drifted name would otherwise fail silently and forever.
++const char kLockDevTools[] = "fury-lock-devtools";
++
+ }  // namespace switches
+ }  // namespace fury
+diff --git a/components/fury/fury_switches.h b/components/fury/fury_switches.h
+index 1ce61872a2..11ff6d3386 100644
+--- a/components/fury/fury_switches.h
++++ b/components/fury/fury_switches.h
+@@ -38,6 +38,24 @@ COMPONENT_EXPORT(FURY) extern const char kFingerprintFileHandle[];
+ // already uses for field trials and histograms.
+ COMPONENT_EXPORT(FURY) extern const char kFingerprintHandle[];
+ 
++// Browser process only. Refuses DevTools and every CDP attach for this launch.
++//
++// A switch and NOT a config key, deliberately. The fingerprint config describes
++// a persona — what the profile claims to be — and it is republished into shared
++// memory for every child process including renderers. This is not a claim about
++// a machine, it is a restriction on an operator, and the two must not share a
++// channel. argv also has the property this needs: it is fixed when the browser
++// starts and nothing running inside the profile can change it afterwards, while
++// a preference lives in a JSON file inside the user-data-dir that anyone with
++// the unpacked profile can edit between launches.
++//
++// What it does not stop, stated plainly because a restriction whose limits are
++// undocumented gets trusted past them: an operator who has the binary can
++// relaunch it by hand without this switch. That is the threat model in
++// docs/04 — a dishonest employee with the profile, not one with root on the
++// machine.
++COMPONENT_EXPORT(FURY) extern const char kLockDevTools[];
++
+ }  // namespace switches
+ }  // namespace fury
+ 

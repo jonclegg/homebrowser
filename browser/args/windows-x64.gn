@@ -1,0 +1,101 @@
+# GN args — Windows x64 release build.
+# See docs/03-chromium-fork.md.
+
+target_os = "win"
+target_cpu = "x64"
+
+is_official_build = true
+is_debug = false
+symbol_level = 0
+blink_symbol_level = 0
+dcheck_always_on = false
+
+# --- CRITICAL for anti-detect ------------------------------------------------
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# --- de-Google ---------------------------------------------------------------
+is_chrome_branded = false
+use_official_google_api_keys = false
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+enable_reporting = false
+enable_remoting = false
+# safe_browsing_mode = 0   # DO NOT SET. Measured on M150: leaves the GN graph
+#                          # unresolvable. Needs source patches — see patch 0901.
+enable_hangout_services_extension = false
+
+# MEASURED FALSE ON WINDOWS, 10.09.2026 — the note in macos-arm64-16gb.gn says a
+# build with this off still answers requestMediaKeySystemAccess correctly once
+# agent/src/widevine.rs has staged the blob. On Windows it does not.
+#
+# The staging works: 22,970,008 bytes land in core.bundle/Fury/WidevineCdm from
+# the Chrome installed on the machine. The browser still refuses. Asked through
+# a profile launched by the agent, with that CDM in place:
+#
+#   com.widevine.alpha  NotSupportedError: Unsupported keySystem or
+#                       supportedConfigurations
+#   org.w3.clearkey     available
+#
+# and real Chrome 153.0.8010.37 on the same machine, same probe, answers
+# available for both. So this is not the probe and not a missing file: the
+# support is not registered in a build made with the flag off.
+#
+# That costs the gate's Widevine check, and it costs every profile Netflix,
+# Spotify and Disney+.
+#
+# So it is ON here, from 10.09.2026. What that changes is only whether the
+# SUPPORT is compiled in: the CDM itself is still not in this repository, not in
+# a release and not in an installer — agent/src/widevine.rs copies the one the
+# user's own Chrome is already licensed to have, at agent startup, into the
+# layout Chromium looks in. bundle_widevine_cdm stays off for exactly that
+# reason. See docs/10 for why the blob may not travel with us.
+enable_widevine = true
+
+# enable_nacl was removed upstream by M150; setting it only produces a warning
+enable_print_preview = true
+
+use_lld = true
+# 2 and not 1. The difference is not a tuning knob, it is which of two entirely
+# different binaries comes out:
+#
+#   0  no profile-guided optimisation at all
+#   1  an INSTRUMENTED build, whose purpose is to RUN and record a profile
+#   2  an optimised build that READS a recorded profile
+#
+# This file said 1, and 1 was built: eight hours on 16.08.2026 produced a
+# chrome.dll of 701 MB against 293 MB for the same tree without PGO, and
+# `grep -a __llvm_profile chrome.dll` found the instrumentation runtime in it.
+# An instrumented Chromium is roughly a third slower, writes .profraw files when
+# it exits, and for this project is worse than merely unshippable -- a browser
+# whose timings are visibly not Chrome's fails the thing every patch here exists
+# to achieve.
+#
+# Nothing complained, and nothing would have: an instrumented build is a correct
+# build of a different thing. It was found by the size, after the eight hours.
+#
+# Phase 2 needs chrome/build/pgo_profiles/*.profdata, which arrives with the
+# checkout because .gclient carries checkout_pgo_profiles: True. Verified present
+# on both machines before this line was changed. If a tree ever lacks them the
+# build fails at gn time with a clear message, which is the right way round.
+chrome_pgo_phase = 2
+
+# --- match real Chrome's feature set ----------------------------------------
+# An unbranded build applies testing/variations/fieldtrial_testing_config.json
+# by default (variations_field_trial_creator.cc:142), which force-enables
+# features that real stable Chrome ships disabled. ReduceAcceptLanguage and
+# ReduceAcceptLanguageHTTP are both in there for mac and windows, and they trim
+# Accept-Language to one language while navigator.languages still reports the
+# full list — a browser contradicting itself, from a build setting rather than
+# from anything in the patches.
+#
+# Also passed as --disable-field-trial-config at launch, so binaries built
+# before this line still behave.
+disable_fieldtrial_testing_config = true
+
+# Keep ninja. autoninja in this depot_tools prefers Siso and then refuses an
+# output directory ninja created — "run gn clean", which throws away every
+# object file. Saying so here is cheaper than losing a build to a default that
+# changed upstream.
+use_siso = false

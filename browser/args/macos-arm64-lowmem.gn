@@ -1,0 +1,108 @@
+# GN args — macOS arm64, first build on a 16 GB machine.
+#
+# Use this for the FIRST build. Its job is to prove the toolchain works, not to
+# produce a shippable binary. Once it succeeds, move to macos-arm64.gn.
+#
+# Why a separate file: an official build enables ThinLTO and PGO, and each LTO
+# link job can hold 8-16 GB resident. On a 16 GB machine that either OOMs or
+# swaps for hours. Discovering this after a four-hour build is a bad way to
+# spend an evening.
+
+target_os = "mac"
+target_cpu = "arm64"
+
+# --- the low-memory choices -------------------------------------------------
+# No LTO, no PGO. Costs runtime performance and binary size, saves the build.
+is_official_build = false
+is_debug = false
+symbol_level = 0
+blink_symbol_level = 0
+dcheck_always_on = false
+chrome_pgo_phase = 0
+
+# Chromium's own throttle for parallel link jobs. Even without LTO, several
+# concurrent links of a binary this size will exhaust 16 GB.
+concurrent_links = 1
+
+# --- CRITICAL for anti-detect, kept even in the trial build ------------------
+# A build without these cannot decode H.264/AAC while real Chrome can, and two
+# lines of JS tell them apart. Keeping them here means the trial build is still
+# a valid subject for the detect-suite.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# --- de-Google ---------------------------------------------------------------
+is_chrome_branded = false
+use_official_google_api_keys = false
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+enable_reporting = false
+enable_remoting = false
+enable_hangout_services_extension = false
+
+# safe_browsing_mode is deliberately NOT set to 0 here.
+#
+# Measured on Chromium 150: `safe_browsing_mode = 0` leaves the build graph
+# unresolvable, because chrome/browser/feedback, chrome/test:unit_tests and
+# others keep unconditional dependencies on //components/safe_browsing targets
+# that the option removes:
+#
+#   ERROR Unresolved dependencies.
+#   //chrome/browser/feedback:feedback_impl
+#     needs //components/safe_browsing/content/browser:client_side_detection
+#
+# Removing Safe Browsing properly needs source patches — this is what
+# ungoogled-chromium does — not a GN flag. Patch 0901 now does exactly that: it
+# flips the DEFAULT of prefs::kSafeBrowsingEnabled to false rather than blanking
+# the hardcoded sb-ssl.google.com URL, which would crash the browser at startup.
+# verify-0901.py reads the value back through the browser's own settings page,
+# which is what distinguishes a compiled-in default from a pref nobody wrote.
+#
+# The runtime suppression stays as well: launcher.rs passes
+# --safebrowsing-disable-auto-update and --disable-background-networking, and no
+# Google API key is compiled in.
+
+# Turned ON. Real Chrome accepts com.widevine.alpha and our build refused it —
+# the last failing gate check and a three-line detection.
+#
+# The CDM itself is a proprietary blob we cannot redistribute, but the support
+# code is open and the blob is already on any machine with Chrome installed.
+# Building with support lets the browser advertise and load it, which is what
+# the check measures. If the CDM is absent at runtime the behaviour is no worse
+# than today.
+enable_widevine = true
+
+# bundle_widevine_cdm defaults to false for us, because upstream gates it on
+# is_chrome_branded — and with it false the build expects the component updater
+# to fetch the CDM at runtime, which we deliberately disable (that fetch would
+# leave through the real IP, not the profile proxy).
+#
+# Set explicitly, with the blob staged from the locally installed Chrome by
+# browser/build/link-widevine.sh. The CDM is never committed; see docs/10 for why
+# using a local copy and shipping one are different questions.
+bundle_widevine_cdm = true
+
+# enable_nacl was removed upstream by M150; setting it only produces a warning
+enable_print_preview = true
+
+use_lld = true
+
+# --- match real Chrome's feature set ----------------------------------------
+# An unbranded build applies testing/variations/fieldtrial_testing_config.json
+# by default (variations_field_trial_creator.cc:142), which force-enables
+# features that real stable Chrome ships disabled. ReduceAcceptLanguage and
+# ReduceAcceptLanguageHTTP are both in there for mac and windows, and they trim
+# Accept-Language to one language while navigator.languages still reports the
+# full list — a browser contradicting itself, from a build setting rather than
+# from anything in the patches.
+#
+# Also passed as --disable-field-trial-config at launch, so binaries built
+# before this line still behave.
+disable_fieldtrial_testing_config = true
+
+# Keep ninja. autoninja in this depot_tools prefers Siso and then refuses an
+# output directory ninja created — "run gn clean", which throws away every
+# object file. Saying so here is cheaper than losing a build to a default that
+# changed upstream.
+use_siso = false

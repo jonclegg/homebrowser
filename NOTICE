@@ -1,0 +1,43 @@
+Homebrowser
+===========
+
+Homebrowser's own code (agent/, examples/, image/, tests/, skills/, the scripts
+and Compose files) is licensed under the MIT License (see LICENSE). It began as
+Cloakroom, an earlier project by the same author.
+
+browser/
+  The browser is Chromium with Fury's fingerprint patches, built for Linux.
+  browser/ is the core/ folder of Fury (upstream
+  https://github.com/furyteamtop/fury-antidetect-browser; Linux port in
+  https://github.com/jonclegg/fury-antidetect-browser, branch linux-build).
+  - Chromium is BSD-3-Clause licensed by The Chromium Authors, with third-party
+    components under their own licenses (listed at chrome://credits in the
+    browser). The core is built with proprietary_codecs (H.264, AAC), as Chrome is.
+  - The patch series (browser/patches) is BSD-3-Clause licensed by The Fury
+    Authors (browser/patches/LICENSE).
+  - The build and verify scripts (browser/build, browser/verify,
+    browser/release/pack-core-linux.sh) are AGPL-3.0-or-later, as in Fury.
+    They build the browser; none of them are in the image.
+  - browser/personas/personas.json is derived from Fury's persona catalogue
+    (shared-rs/src/catalogue.rs, AGPL-3.0-or-later) by its `catalogue` example.
+
+serve/
+  cdp-server and its homebrowser_launcher package are adapted from the MIT
+  licensed CloakBrowser wrapper by CloakHQ (https://github.com/CloakHQ/CloakBrowser,
+  through the fork https://github.com/jonclegg/CloakBrowser at 8dcc06f): cloakserve,
+  renamed, and the parts of the cloakbrowser package it uses. See serve/LICENSE.
+  Homebrowser does not contain or download CloakHQ's proprietary binary.
+
+Patchright (https://github.com/Kaliiiiiiiiii-Vinyzu/patchright, Apache-2.0) is
+installed from PyPI at build time; image/patch-patchright.py changes two lines of
+its driver in the image.
+
+The viewer uses noVNC (MPL-2.0), websockify (LGPL-3.0) and x11vnc (GPL-2.0),
+installed from Debian packages at build time. websockify and x11vnc are
+unmodified. noVNC is unmodified except that the build adds one hidden element
+to its vnc.html (see image/Dockerfile) so browsers holding a cached older noVNC
+script still load. noVNC's vnc.html is BSD-2-Clause per its file header; the
+rest of noVNC is MPL-2.0.
+
+Homebrowser is an independent project and is not affiliated with or endorsed by
+CloakHQ or the Fury authors.

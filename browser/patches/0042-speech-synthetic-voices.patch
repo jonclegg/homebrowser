@@ -1,0 +1,48 @@
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -27,6 +27,7 @@
+ 
+ #include <algorithm>
+ 
++#include "base/strings/string_split.h"
+ #include "components/fury/fury_config.h"
+ 
+ #include <tuple>
+@@ -144,6 +145,37 @@
+         }
+       }
+     }
++  }
++  // Fury: a machine with no voices at all reports the persona's. A Linux
++  // container has none, and zero voices is a fingerprint no Mac or Windows PC
++  // has: bot checks hash the list (one decoded sensor carried the count, 199 on
++  // a real Mac, -1 in the container, and a hash of the names, 0). Unlike 0041
++  // this widens, so speak() with one of these voices has no engine behind it;
++  // it is limited to the case where the alternative is an empty list.
++  //
++  // Entries are "name\tlang\tlocalService\tdefault\tvoiceURI", from
++  // speech.syntheticVoices. Refilled whenever the platform has cleared the list.
++  if (voice_list_.empty()) {
++    if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++      if (std::optional<std::vector<std::string>> synthetic =
++              config->GetStringList("speech.syntheticVoices")) {
++        for (const std::string& entry : *synthetic) {
++          std::vector<std::string> fields = base::SplitString(
++              entry, "\t", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
++          if (fields.size() != 5) {
++            continue;
++          }
++          auto voice = mojom::blink::SpeechSynthesisVoice::New();
++          voice->name = String::FromUtf8(fields[0]);
++          voice->lang = String::FromUtf8(fields[1]);
++          voice->is_local_service = fields[2] == "1";
++          voice->is_default = fields[3] == "1";
++          voice->voice_uri = String::FromUtf8(fields[4]);
++          voice_list_.push_back(
++              MakeGarbageCollected<SpeechSynthesisVoice>(std::move(voice)));
++        }
++      }
++    }
+   }
+   return voice_list_;
+ }

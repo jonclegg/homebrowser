@@ -1,0 +1,27 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -239,6 +239,7 @@
+ #include "chrome/common/webui_url_constants.h"
+ #include "chrome/common/webui_url_utils.h"
+ #include "chrome/installer/util/google_update_settings.h"
++#include "components/fury/fury_config.h"
+ #include "components/fury/location/fury_location_provider.h"
+ #include "components/autofill/core/common/autofill_features.h"
+ #include "components/autofill/core/common/autofill_switches.h"
+@@ -4893,6 +4894,15 @@
+       GetRootScrollbarThemeColor(web_contents);
+ 
+   web_prefs->translate_service_available = TranslateService::IsAvailable(prefs);
++  // Fury: Google Chrome has a translate service, which a build without Google
++  // API keys does not, and Blink exposes hrefTranslate on <a> only with one.
++  // Only the page-facing flag; translation itself stays unavailable.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<bool> available =
++            config->GetBool("translate.serviceAvailable")) {
++      web_prefs->translate_service_available = *available;
++    }
++  }
+ 
+   std::optional<ui::CaptionStyle> style =
+       captions::GetCaptionStyleFromUserSettings(prefs,

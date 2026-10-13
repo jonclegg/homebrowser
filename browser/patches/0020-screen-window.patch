@@ -1,0 +1,227 @@
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index 0d60244742..c7b239cac0 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/core/css/media_values.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include "third_party/blink/public/common/css/scripting.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
+@@ -164,6 +166,18 @@ double MediaValues::CalculateDynamicViewportHeight(LocalFrame* frame) {
+ 
+ int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
++  // The CSS side of screen.width. Screen::GetRect() is patched, and these read
++  // ScreenInfo directly, so without this a page asking
++  // matchMedia('(device-width: 1920px)') was told the host's real screen while
++  // screen.width said the persona's. Measured on 0.2.2: JS 1920x1080 at 1x,
++  // CSS 1470 at 2dppx. Two answers to one question is the tell.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<int> width = config->GetInt("screen.width")) {
++      if (*width > 0) {
++        return *width;
++      }
++    }
++  }
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_width = screen_info.rect.width();
+@@ -176,6 +190,13 @@ int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
+ 
+ int MediaValues::CalculateDeviceHeight(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<int> height = config->GetInt("screen.height")) {
++      if (*height > 0) {
++        return *height;
++      }
++    }
++  }
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_height = screen_info.rect.height();
+@@ -193,6 +214,17 @@ bool MediaValues::CalculateStrictMode(LocalFrame* frame) {
+ }
+ 
+ float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
++  // `resolution` and `-webkit-device-pixel-ratio` — and srcset/image-set pick
++  // their candidate from this too, which is what a page on a screen of that
++  // density would load. Same value window.devicePixelRatio reports.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<double> dpr =
++            config->GetDouble("screen.devicePixelRatio")) {
++      if (*dpr > 0) {
++        return static_cast<float>(*dpr);
++      }
++    }
++  }
+   return frame->DevicePixelRatio();
+ }
+ 
+@@ -208,6 +240,16 @@ bool MediaValues::CalculateDeviceSupportsHDR(LocalFrame* frame) {
+ int MediaValues::CalculateColorBitsPerComponent(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
++  // `(color: N)` is bits per component, screen.colorDepth is bits per pixel
++  // over three components: 24 -> 8, 30 -> 10. A Mac host reports 10 here, and
++  // a Windows persona claiming colorDepth 24 beside it contradicts itself.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<int> depth = config->GetInt("screen.colorDepth")) {
++      if (*depth > 0) {
++        return *depth / 3;
++      }
++    }
++  }
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   if (screen_info.is_monochrome) {
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 74cc1c0b51..d17ae8ba29 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -26,6 +26,8 @@
+ 
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include <memory>
+ #include <optional>
+ #include <utility>
+@@ -1683,6 +1685,27 @@ int LocalDOMWindow::outerHeight() const {
+   }
+ 
+   ChromeClient& chrome_client = page->GetChromeClient();
++
++  // outerHeight is derived from the REAL innerHeight plus a configured chrome
++  // height, rather than being set outright.
++  //
++  // The difference outerHeight - innerHeight is the height of the browser
++  // chrome, and it differs between Windows and macOS — which is why phase 0
++  // measured 143 px on our clean build against 87 px on real Chrome. It has to
++  // match the claimed OS.
++  //
++  // But innerHeight is the actual viewport: page layout depends on it, and
++  // faking it would break rendering and contradict every element measurement on
++  // the page. So the real viewport is kept and only the chrome is described.
++  // The window stays freely resizable and the delta stays correct at any size.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<int> delta = config->GetInt("screen.chromeHeightDelta")) {
++      if (*delta >= 0) {
++        return innerHeight() + *delta;
++      }
++    }
++  }
++
+   if (page->GetSettings().GetReportScreenSizeInPhysicalPixelsQuirk()) {
+     return static_cast<int>(
+         lroundf(chrome_client.RootWindowRect(*frame).height() *
+@@ -1715,6 +1738,18 @@ int LocalDOMWindow::outerWidth() const {
+   }
+ 
+   ChromeClient& chrome_client = page->GetChromeClient();
++
++  // Same reasoning as outerHeight: describe the chrome, keep the real viewport.
++  // On both Windows and macOS this delta is 0 for a normal window, but it is
++  // configurable rather than assumed.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<int> delta = config->GetInt("screen.chromeWidthDelta")) {
++      if (*delta >= 0) {
++        return innerWidth() + *delta;
++      }
++    }
++  }
++
+   if (page->GetSettings().GetReportScreenSizeInPhysicalPixelsQuirk()) {
+     return static_cast<int>(
+         lroundf(chrome_client.RootWindowRect(*frame).width() *
+@@ -1936,6 +1971,15 @@ double LocalDOMWindow::devicePixelRatio() const {
+     return 0.0;
+   }
+ 
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<double> dpr =
++            config->GetDouble("screen.devicePixelRatio")) {
++      if (*dpr > 0) {
++        return *dpr;
++      }
++    }
++  }
++
+   return GetFrame()->DevicePixelRatio();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index ed5028943e..b439c025e8 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -28,6 +28,8 @@
+ 
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include "base/numerics/safe_conversions.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -106,6 +108,16 @@ unsigned Screen::colorDepth() const {
+   // https://drafts.csswg.org/cssom-view/#dom-screen-colordepth
+   unsigned unknown_color_depth = 24u;
+ 
++  // pixelDepth() forwards to this, so both follow one value — no real browser
++  // reports the two differently.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<int> depth = config->GetInt("screen.colorDepth")) {
++      if (*depth > 0) {
++        return static_cast<unsigned>(*depth);
++      }
++    }
++  }
++
+   if (!DomWindow()) {
+     return unknown_color_depth;
+   }
+@@ -175,6 +187,39 @@ gfx::Rect Screen::GetRect(bool available) const {
+   LocalFrame* frame = DomWindow()->GetFrame();
+   const display::ScreenInfo& screen_info = GetScreenInfo();
+   gfx::Rect rect = available ? screen_info.available_rect : screen_info.rect;
++
++  // screen.width, height, availWidth, availHeight, availLeft and availTop all
++  // read through here, so one override keeps all six mutually consistent.
++  // Overriding them getter by getter would make it possible to ship an
++  // availWidth larger than width — a contradiction no real display produces.
++  //
++  // Fields are applied independently: pinning the resolution while leaving the
++  // available area to the real machine is a legitimate combination.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    const std::optional<int> width = config->GetInt(
++        available ? "screen.availWidth" : "screen.width");
++    const std::optional<int> height = config->GetInt(
++        available ? "screen.availHeight" : "screen.height");
++    if (width && *width > 0) {
++      rect.set_width(*width);
++    }
++    if (height && *height > 0) {
++      rect.set_height(*height);
++    }
++    if (available) {
++      if (std::optional<int> left = config->GetInt("screen.availLeft")) {
++        rect.set_x(*left);
++      }
++      if (std::optional<int> top = config->GetInt("screen.availTop")) {
++        rect.set_y(*top);
++      }
++    } else {
++      // The screen rect is always at the origin; only the available rect is
++      // inset. A stale offset here would contradict the reported size.
++      rect.set_origin(gfx::Point());
++    }
++    return rect;
++  }
+   if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk())
+     return gfx::ScaleToRoundedRect(rect, screen_info.device_scale_factor);
+   if (frame->GetDocument() && frame->GetDocument()->TextScaleMetaTagPresent()) {

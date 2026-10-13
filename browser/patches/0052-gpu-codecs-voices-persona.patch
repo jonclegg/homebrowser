@@ -1,0 +1,248 @@
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu.cc b/third_party/blink/renderer/modules/webgpu/gpu.cc
+--- a/third_party/blink/renderer/modules/webgpu/gpu.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu.cc
+@@ -265,6 +265,20 @@
+     return;
+   }
+ 
++  // Fury: a persona with a hardware GPU has no fallback adapter to offer, and
++  // answers a request for one with null, as Chrome on a Mac does. SwiftShader
++  // is the container's only adapter, so it would otherwise answer this request
++  // too, and a bot check that asks for the fallback adapter finds one.
++  if (options->forceFallbackAdapter()) {
++    if (const fury::FuryConfig* config = fury::FuryConfig::Get();
++        config && config->GetBool("gpu.webgpu.isFallbackAdapter") == false) {
++      OnRequestAdapterCallback(script_state, options, resolver,
++                               wgpu::RequestAdapterStatus::Unavailable,
++                               nullptr, "");
++      return;
++    }
++  }
++
+   if (!dawn_control_client_ || dawn_control_client_->IsContextLost()) {
+     dawn_control_client_initialized_callbacks_.push_back(BindOnce(
+         [](GPU* gpu, ScriptState* script_state,
+diff --git a/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc b/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc
+--- a/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc
++++ b/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc
+@@ -7,9 +7,11 @@
+ #include "base/feature_list.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/memory/ptr_util.h"
++#include "base/strings/string_split.h"
+ #include "base/strings/string_util.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "build/build_config.h"
++#include "components/fury/fury_config.h"
+ #include "media/base/media_switches.h"
+ #include "media/mojo/clients/mojo_video_encoder_metrics_provider.h"
+ #include "media/video/gpu_video_accelerator_factories.h"
+@@ -54,6 +56,41 @@
+   return formats1;
+ }
+ 
++// Fury: the persona's hardware codecs, from a list of
++// "name;key=value;key=value" entries. Chrome on a Mac lists VideoToolbox's
++// H.264 High and H.265 after its software codecs, and a WebRTC offer numbers
++// its payload types from that list; without them the offer is shorter and
++// RED and ULPFEC take other numbers. Creating one of these codecs still fails,
++// as there is no hardware behind it.
++std::vector<webrtc::SdpVideoFormat> PersonaFormats(std::string_view path) {
++  std::vector<webrtc::SdpVideoFormat> formats;
++  const fury::FuryConfig* config = fury::FuryConfig::Get();
++  if (!config) {
++    return formats;
++  }
++  std::optional<std::vector<std::string>> entries = config->GetStringList(path);
++  if (!entries) {
++    return formats;
++  }
++  for (const std::string& entry : *entries) {
++    std::vector<std::string> fields = base::SplitString(
++        entry, ";", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if (fields.empty()) {
++      continue;
++    }
++    webrtc::CodecParameterMap parameters;
++    for (size_t index = 1; index < fields.size(); ++index) {
++      std::vector<std::string> key_value = base::SplitString(
++          fields[index], "=", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++      if (key_value.size() == 2) {
++        parameters[key_value[0]] = key_value[1];
++      }
++    }
++    formats.emplace_back(fields[0], parameters);
++  }
++  return formats;
++}
++
+ std::unique_ptr<webrtc::VideoDecoder> CreateDecoder(
+     webrtc::VideoDecoderFactory* factory,
+     const webrtc::Environment& env,
+@@ -147,10 +184,12 @@
+   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
+     std::vector<webrtc::SdpVideoFormat> software_formats =
+         software_encoder_factory_.GetSupportedFormats();
+-    return hardware_encoder_factory_
+-               ? MergeFormats(software_formats,
+-                              hardware_encoder_factory_->GetSupportedFormats())
+-               : software_formats;
++    return MergeFormats(
++        hardware_encoder_factory_
++            ? MergeFormats(software_formats,
++                           hardware_encoder_factory_->GetSupportedFormats())
++            : software_formats,
++        PersonaFormats("webrtc.encoderFormats"));
+   }
+ 
+   webrtc::VideoEncoderFactory::CodecSupport QueryCodecSupport(
+@@ -206,10 +245,12 @@
+   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
+     std::vector<webrtc::SdpVideoFormat> software_formats =
+         software_decoder_factory_.GetSupportedFormats();
+-    return hardware_decoder_factory_
+-               ? MergeFormats(software_formats,
+-                              hardware_decoder_factory_->GetSupportedFormats())
+-               : software_formats;
++    return MergeFormats(
++        hardware_decoder_factory_
++            ? MergeFormats(software_formats,
++                           hardware_decoder_factory_->GetSupportedFormats())
++            : software_formats,
++        PersonaFormats("webrtc.decoderFormats"));
+   }
+ 
+   webrtc::VideoDecoderFactory::CodecSupport QueryCodecSupport(
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -33,6 +33,9 @@
+ #include <tuple>
+ 
+ #include "build/build_config.h"
++#include "third_party/blink/renderer/platform/wtf/functional.h"
++#include "third_party/blink/public/platform/task_type.h"
++#include "base/time/time.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -94,6 +97,66 @@
+     voice_list_.push_back(
+         MakeGarbageCollected<SpeechSynthesisVoice>(std::move(mojom_voice)));
+   }
++  // Fury: a machine with no voices at all reports the persona's. A Linux
++  // container has none, and zero voices is a fingerprint no Mac or Windows PC
++  // has: bot checks hash the list (one decoded sensor carried the count, 199 on
++  // a real Mac, -1 in the container, and a hash of the names, 0). Unlike 0041
++  // this widens, so speak() with one of these voices has no engine behind it;
++  // it is limited to the case where the alternative is an empty list.
++  //
++  // Entries are "name\tlang\tlocalService\tdefault\tvoiceURI", from
++  // speech.syntheticVoices. Refilled whenever the platform sends an empty list.
++  //
++  // Filled here, when the platform's list arrives, and not in getVoices():
++  // Chrome on a Mac answers a page's first getVoices() with an empty list and
++  // fires voiceschanged when the voices load. A list that is there at once
++  // is a machine that is not a Mac.
++  //
++  // In two steps, as on a Mac: Chrome's network voices at once, then about a
++  // quarter second later the full list, the system voices first, each step
++  // with its own voiceschanged.
++  if (voice_list_.empty() && SetSyntheticVoices(/*network_only=*/true)) {
++    GetSupplementable()
++        ->GetTaskRunner(TaskType::kMiscPlatformAPI)
++        ->PostDelayedTask(FROM_HERE,
++                          BindOnce(&SpeechSynthesis::FinishSyntheticVoices,
++                                   WrapWeakPersistent(this)),
++                          base::Milliseconds(250));
++  }
++  VoicesDidChange();
++}
++
++bool SpeechSynthesis::SetSyntheticVoices(bool network_only) {
++  const fury::FuryConfig* config = fury::FuryConfig::Get();
++  if (!config) {
++    return false;
++  }
++  std::optional<std::vector<std::string>> synthetic =
++      config->GetStringList("speech.syntheticVoices");
++  if (!synthetic) {
++    return false;
++  }
++  voice_list_.clear();
++  for (const std::string& entry : *synthetic) {
++    std::vector<std::string> fields = base::SplitString(
++        entry, "\t", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
++    if (fields.size() != 5 || (network_only && fields[2] == "1")) {
++      continue;
++    }
++    auto voice = mojom::blink::SpeechSynthesisVoice::New();
++    voice->name = String::FromUtf8(fields[0]);
++    voice->lang = String::FromUtf8(fields[1]);
++    voice->is_local_service = fields[2] == "1";
++    voice->is_default = network_only ? voice_list_.empty() : fields[3] == "1";
++    voice->voice_uri = String::FromUtf8(fields[4]);
++    voice_list_.push_back(
++        MakeGarbageCollected<SpeechSynthesisVoice>(std::move(voice)));
++  }
++  return true;
++}
++
++void SpeechSynthesis::FinishSyntheticVoices() {
++  SetSyntheticVoices(/*network_only=*/false);
+   VoicesDidChange();
+ }
+ 
+@@ -145,37 +208,6 @@
+         }
+       }
+     }
+-  }
+-  // Fury: a machine with no voices at all reports the persona's. A Linux
+-  // container has none, and zero voices is a fingerprint no Mac or Windows PC
+-  // has: bot checks hash the list (one decoded sensor carried the count, 199 on
+-  // a real Mac, -1 in the container, and a hash of the names, 0). Unlike 0041
+-  // this widens, so speak() with one of these voices has no engine behind it;
+-  // it is limited to the case where the alternative is an empty list.
+-  //
+-  // Entries are "name\tlang\tlocalService\tdefault\tvoiceURI", from
+-  // speech.syntheticVoices. Refilled whenever the platform has cleared the list.
+-  if (voice_list_.empty()) {
+-    if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
+-      if (std::optional<std::vector<std::string>> synthetic =
+-              config->GetStringList("speech.syntheticVoices")) {
+-        for (const std::string& entry : *synthetic) {
+-          std::vector<std::string> fields = base::SplitString(
+-              entry, "\t", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
+-          if (fields.size() != 5) {
+-            continue;
+-          }
+-          auto voice = mojom::blink::SpeechSynthesisVoice::New();
+-          voice->name = String::FromUtf8(fields[0]);
+-          voice->lang = String::FromUtf8(fields[1]);
+-          voice->is_local_service = fields[2] == "1";
+-          voice->is_default = fields[3] == "1";
+-          voice->voice_uri = String::FromUtf8(fields[4]);
+-          voice_list_.push_back(
+-              MakeGarbageCollected<SpeechSynthesisVoice>(std::move(voice)));
+-        }
+-      }
+-    }
+   }
+   return voice_list_;
+ }
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.h b/third_party/blink/renderer/modules/speech/speech_synthesis.h
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.h
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.h
+@@ -101,6 +101,11 @@
+ 
+  private:
+   void VoicesDidChange();
++  // Fury: fills the voice list from the persona's, and returns false when the
++  // persona carries none. With network_only, only the network voices, the
++  // first of them the default, as the browser marks a list it sends.
++  bool SetSyntheticVoices(bool network_only);
++  void FinishSyntheticVoices();
+   void StartSpeakingImmediately();
+   void HandleSpeakingCompleted(
+       SpeechSynthesisUtterance*,

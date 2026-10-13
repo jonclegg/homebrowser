@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright 2026 Bogdan Shapovalov and the Fury authors
+
+# Build the patched Chromium.
+#
+# Usage: browser/build/build.sh <target>
+#   targets: macos-arm64 | macos-x64 | windows-x64 | linux-x64 | linux-arm64
+#
+# Full build: 1.5-3 h on 32+ cores, 4-8 h on a laptop. Incremental after one
+# patch: 5-30 min. Do not delete out/ between runs — that is your ccache.
+set -euo pipefail
+
+CORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$CORE_DIR/src"
+TARGET="${1:?usage: build.sh <macos-arm64|macos-x64|windows-x64|linux-x64|linux-arm64>}"
+# `.noindex` is not decoration: it is the only thing measured to work.
+#
+# ninja writes the five helper applications as standalone bundles beside
+# Fury.app, so a machine that builds ends up with "Fury Helper", "Fury Helper
+# (GPU)" and two things called "Fury" in Spotlight, none of which anybody can
+# usefully open. A directory whose name ends in .noindex is excluded from the
+# index — the mechanism Xcode uses for DerivedData — and it was checked the same
+# way everything else here is: two identical bundles, one in a plain directory
+# and one in a .noindex, and only the plain one came back from mdfind.
+#
+# `.metadata_never_index`, which is the documented answer and the obvious first
+# try, does NOT work on macOS 26. Both bundles were indexed. It is written below
+# anyway because it costs nothing and older systems honour it.
+#
+# Renaming an existing output directory is cheap: ninja's paths inside it are
+# relative, so out/macos-arm64-lowmem -> out/macos-arm64-lowmem.noindex cost 11
+# steps and 22 seconds on a tree that takes six hours to build from scratch.
+OUT="out/$TARGET.noindex"
+
+# An output directory from before this convention. Renamed rather than left, so
+# the six hours already spent are not spent again.
+if [ -d "$SRC/out/$TARGET" ] && [ ! -d "$SRC/$OUT" ]; then
+  echo "==> moving out/$TARGET to $OUT so Spotlight stops indexing it"
+  mv "$SRC/out/$TARGET" "$SRC/$OUT"
+fi
+
+export PATH="$CORE_DIR/depot_tools:$PATH"
+export DEPOT_TOOLS_UPDATE=0
+DEPOT_TOOLS="$CORE_DIR/depot_tools"
+
+# --- one-time depot_tools bootstrap -----------------------------------------
+# gn and friends need python3_bin_reldir.txt, which only appears after a
+# bootstrap. DEPOT_TOOLS_UPDATE=0 (kept, for reproducible builds) suppresses the
+# implicit one, so run it explicitly — and run it with cwd INSIDE depot_tools,
+# because its scripts resolve relative paths from the working directory, not
+# from their own location. Invoking it as ./depot_tools/ensure_bootstrap fails
+# with a confusing "cipd_client_version.digests: No such file" instead.
+if [ ! -f "$DEPOT_TOOLS/python3_bin_reldir.txt" ]; then
+  echo "==> Bootstrapping depot_tools (one time)"
+  (cd "$DEPOT_TOOLS" && ./ensure_bootstrap)
+fi
+
+# Prefix match, so variants like macos-arm64-lowmem resolve to the right platform.
+case "$TARGET" in
+  macos-arm64*|macos-x64*)
+    [ "$(uname -s)" = "Darwin" ] || {
+      echo "!! macOS targets require a physical Mac. There is no cross-compile." >&2
+      exit 1
+    }
+    ;;
+  windows-x64*)
+    case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *)
+      echo "!! Build Windows on Windows. Cross-building is possible but brittle." >&2
+      exit 1 ;;
+    esac
+
+    # Fury's icons into the tree, every time. Nothing did this on Windows until
+    # 0.2.4: link-icons.sh is macOS-only, so every Windows core wore Chromium's
+    # icon on the taskbar. Cheap and idempotent -- the files are regenerated
+    # from assets/icon.png and ninja only relinks what they feed.
+    echo "==> Fury icons (link-icons-windows.ps1)"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass \
+      -File "$(cygpath -w "$CORE_DIR/build/link-icons-windows.ps1")" || {
+      echo "!! could not put Fury's icons into the tree; refusing to build a Chromium-branded core" >&2
+      exit 1
+    }
+
+    # Point Chromium at Visual Studio by hand, because it cannot find it itself
+    # from here.
+    #
+    # build/vs_toolchain.py locates the compiler by running vswhere.exe out of
+    # "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer". That expands to
+    # nothing under Git Bash: bash refuses to import environment variables whose
+    # names contain parentheses, so `ProgramFiles(x86)` — the one Microsoft
+    # picked — is silently absent from every shell we run builds in. The failure
+    # arrives four levels deep as "No supported Visual Studio can be found",
+    # which reads like the compiler is missing rather than like the path is.
+    #
+    # vs_toolchain.py checks $vs2022_install before it reaches for vswhere, so
+    # supplying that skips the broken lookup entirely. WINDOWSSDKDIR has the
+    # same problem for the same reason and is set the same way.
+    #
+    # Hardcoding the two default install paths rather than searching: these are
+    # where the Build Tools and the full IDE put themselves, and a machine that
+    # has VS somewhere else can set vs2022_install itself and be left alone.
+    if [ -z "${vs2022_install:-}" ]; then
+      for candidate in \
+        "/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools" \
+        "/c/Program Files/Microsoft Visual Studio/2022/BuildTools" \
+        "/c/Program Files/Microsoft Visual Studio/2022/Community" \
+        "/c/Program Files/Microsoft Visual Studio/2022/Professional" \
+        "/c/Program Files/Microsoft Visual Studio/2022/Enterprise"; do
+        if [ -d "$candidate" ]; then
+          export vs2022_install="$(cygpath -w "$candidate")"
+          echo "==> vs2022_install=$vs2022_install"
+          break
+        fi
+      done
+    fi
+    if [ -z "${vs2022_install:-}" ]; then
+      echo "!! Visual Studio 2022 not found. Install the Build Tools with the" >&2
+      echo "!! 'Desktop development with C++' workload, or set vs2022_install." >&2
+      exit 1
+    fi
+    if [ -z "${WINDOWSSDKDIR:-}" ] && [ -d "/c/Program Files (x86)/Windows Kits/10" ]; then
+      export WINDOWSSDKDIR="$(cygpath -w "/c/Program Files (x86)/Windows Kits/10")"
+    fi
+    # Use the locally installed toolchain, not Google's internal package. Set
+    # system-wide on the build server already; exported here so a fresh machine
+    # or a stripped environment does not fail differently.
+    export DEPOT_TOOLS_WIN_TOOLCHAIN=0
+    ;;
+  linux-x64*|linux-arm64*)
+    # Both from an x64 Linux host: linux-x64 natively, linux-arm64 against the
+    # arm64 sysroot fetch.sh asks gclient for. The other direction (an arm64
+    # host) is not what Chromium's Linux toolchain prebuilts are made for.
+    [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ] || {
+      echo "!! Linux targets build on an x86_64 Linux host." >&2
+      exit 1
+    }
+    # The host tools the build runs (gperf, bison, the X11 headers some
+    # generators read). Chromium's own script installs them; it needs sudo, so it
+    # is named here rather than run.
+    command -v gperf >/dev/null || {
+      echo "!! Build dependencies are missing. Run once:" >&2
+      echo "!!   sudo $SRC/build/install-build-deps.sh --no-prompt --no-chromeos-fonts" >&2
+      exit 1
+    }
+    ;;
+  *) echo "!! Unknown target: $TARGET" >&2; exit 1 ;;
+esac
+
+ARGS_FILE="$CORE_DIR/args/$TARGET.gn"
+[ -f "$ARGS_FILE" ] || { echo "!! Missing $ARGS_FILE" >&2; exit 1; }
+
+# A 16 GB machine cannot survive a ThinLTO link. Say so before burning four
+# hours, not after the linker gets OOM-killed.
+#
+# Asks the ARGS, not the target's name, and that is a fix. The old test was
+# `$ram_gb -lt 24` and "the name does not contain lowmem", which refused
+# macos-arm64-16gb -- the file written specifically to be buildable here, with
+# is_official_build = true, PGO kept, and use_thin_lto = false on line 144. It
+# then suggested "$TARGET-lowmem", a name it built by concatenation and never
+# checked: browser/args/macos-arm64-16gb-lowmem.gn does not exist and never did.
+# So the advice was to run a config that cannot load, instead of the one already
+# sitting there for exactly this machine. Measured 10.09.2026 on an M5/16 GB.
+if [ "$(uname -s)" = "Darwin" ]; then
+  ram_gb=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+  lto_on=1
+  grep -qE '^[[:space:]]*use_thin_lto[[:space:]]*=[[:space:]]*false' "$ARGS_FILE" && lto_on=0
+  grep -qE '^[[:space:]]*is_official_build[[:space:]]*=[[:space:]]*true' "$ARGS_FILE" || lto_on=0
+  if [ "$ram_gb" -lt 24 ] && [ "$lto_on" = 1 ]; then
+    echo "!! This machine has ${ram_gb} GB RAM and $TARGET links with ThinLTO," >&2
+    echo "!! which holds 8-16 GB for a single link. Configs that build here:" >&2
+    for alt in "$CORE_DIR"/args/"${TARGET%%-*}"-*.gn "$CORE_DIR"/args/*lowmem.gn; do
+      [ -f "$alt" ] || continue
+      grep -qE '^[[:space:]]*use_thin_lto[[:space:]]*=[[:space:]]*false|^[[:space:]]*is_official_build[[:space:]]*=[[:space:]]*false' "$alt" || continue
+      echo "!!   $0 $(basename "${alt%.gn}")" >&2
+    done
+    echo "!! Override with FORCE=1 if you know what you are doing." >&2
+    [ "${FORCE:-0}" = "1" ] || exit 1
+  fi
+fi
+
+mkdir -p "$SRC/$OUT"
+cp "$ARGS_FILE" "$SRC/$OUT/args.gn"
+
+# The SDK, pinned by hand when Xcode has moved on.
+#
+# Chromium links with its own lld, pinned per milestone, and it reads the
+# SDK's .tbd stubs. An Xcode update can ship an SDK whose stubs name a target
+# the pinned lld has never heard of: Xcode 27.0's MacOSX27.0.sdk lists
+# `arm64e.x1-macos`, and a tree that had built on 26.5 the day before failed
+# every link with "could not load TAPI file ... unknown target". Measured
+# 22.09.2026, on an incremental rebuild that changed one .cc file.
+#
+# The SDK the tree was built with usually survives the update under
+# /Library/Developer/CommandLineTools/SDKs, and `mac_sdk_path` is the gn arg
+# that points at it. It is not written into browser/args/ because it is a path
+# on one machine; it comes from the environment:
+#
+#     FURY_MAC_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+#         browser/build/build.sh macos-arm64-16gb
+#
+# Through a link inside the output directory, not by its own path: gn refuses
+# an SDK path outside root_build_dir ("File is not inside output directory",
+# at build/config/mac/BUILD.gn's exc.defs), which is the reason Chromium's
+# own SDK lookup leaves links under sdk/xcode_links/ in the first place. The
+# link a build leaves there says which SDK it used last.
+if [ -n "${FURY_MAC_SDK:-}" ]; then
+  [ -d "$FURY_MAC_SDK" ] || { echo "!! FURY_MAC_SDK is not a directory: $FURY_MAC_SDK" >&2; exit 1; }
+  sdk_name="$(basename "$FURY_MAC_SDK")"
+  mkdir -p "$SRC/$OUT/sdk/xcode_links"
+  ln -sfn "$FURY_MAC_SDK" "$SRC/$OUT/sdk/xcode_links/$sdk_name"
+  echo "==> pinning the macOS SDK to $FURY_MAC_SDK"
+  printf '\nmac_sdk_path = "//%s/sdk/xcode_links/%s"\n' "$OUT" "$sdk_name" >> "$SRC/$OUT/args.gn"
+fi
+
+# Ask Spotlight to skip the build directory.
+#
+# ninja writes the five helper applications as standalone bundles beside
+# Fury.app before copying them into the framework, so a machine that builds ends
+# up with "Fury Helper", "Fury Helper (GPU)" and two things called "Fury" in
+# search — none of which anybody can usefully open.
+#
+# .metadata_never_index is the documented way to ask, and on macOS 26 it does
+# NOT work for an ordinary directory: two identical bundles, one with the marker
+# and one without, were both indexed. Written anyway because it costs nothing
+# and older systems honour it, but it is not the fix and this says so.
+#
+# What does work is a package extension — Spotlight indexes a bundle as one item
+# and does not look inside — which is why real Chrome shows a single result
+# despite carrying five helpers, and why an installed core now lives in
+# core.bundle (agent/src/paths.rs). ninja's output layout is not ours to
+# rename, so on a build machine the honest answer is System Settings →
+# Spotlight → Privacy, with browser/src/out added to it.
+if [ ! -f "$SRC/out/.metadata_never_index" ]; then
+  : > "$SRC/out/.metadata_never_index"
+fi
+
+echo "==> gn gen $OUT"
+(cd "$SRC" && gn gen "$OUT")
+
+# J caps parallelism, which is the only way to actually bound CPU use. `nice`
+# alone just yields under contention — an idle machine still gets fully consumed,
+# which is not what someone who asked for "20%" wants. On a 10-core machine J=2
+# is ~20%.
+JOBS_ARG=""
+if [ -n "${J:-}" ]; then
+  JOBS_ARG="-j$J"
+  echo "==> limiting to $J parallel jobs"
+fi
+
+# An output directory that siso built once and ninja is being asked to build
+# now makes ninja refuse outright: "Run gn clean before switching from siso to
+# ninja". Following that advice costs the full 2 h 42 min, and it is not what
+# the situation calls for — .ninja_log and .ninja_deps are intact and describe
+# a perfectly good incremental build. Only the stale siso bookkeeping is in the
+# way, so it is moved aside rather than obeyed or deleted.
+#
+# Met on a tree whose siso state was three days older than its ninja state; the
+# rebuild that followed took four minutes.
+if [ -e "$SRC/$OUT/.siso_deps" ] && [ -e "$SRC/$OUT/.ninja_log" ]; then
+  echo "==> moving stale siso state aside (ninja will not run beside it)"
+  mkdir -p "$SRC/$OUT/.siso-stale"
+  for f in "$SRC/$OUT"/.siso_*; do
+    [ -e "$f" ] || continue
+    case "$f" in */.siso-stale) continue ;; esac
+    mv "$f" "$SRC/$OUT/.siso-stale/"
+  done
+fi
+
+echo "==> autoninja chrome"
+# Keep the progress counter. ninja prints "[4213/57740] CXX ..." for every step
+# and that line is the only place the TOTAL appears — .ninja_log records what
+# finished and never what remains, so without this the question "how far along
+# is it" has no answer for eight hours at a stretch.
+#
+# It used to be lost: every caller ran this through `tail`, which shows nothing
+# until the pipe closes. Written to a file as well as to the terminal, so
+# tools/build-status.sh can answer from another machine while the build runs.
+#
+# `> file` and not `>> file`: one build, one log. Appending would leave the last
+# line of the previous build looking like progress in this one.
+PROGRESS="$SRC/$OUT/build-progress.log"
+# Neither the status nor set -e is trusted with this one. On the Windows box a
+# build that printed "FAILED:" and "ninja: build stopped" left this script with
+# status 0 and without reaching the next line, three times on 29.09.2026, and
+# the job went on as if the binaries were new. So the pipeline runs with -e
+# off, and success needs BOTH a zero status and ninja's own output without a
+# failure in it -- unanchored, because ninja redraws its progress line with a
+# carriage return there and "FAILED:" lands mid-line.
+set +e
+(cd "$SRC" && autoninja -C "$OUT" $JOBS_ARG chrome 2>&1 | tee "$PROGRESS")
+status=$?
+set -e
+if [ "$status" -ne 0 ] || grep -qE 'FAILED: |ninja: build stopped' "$PROGRESS"; then
+  echo "!! the build failed (autoninja status $status) -- see the output above" >&2
+  exit 1
+fi
+
+echo "==> Built: $SRC/$OUT"
+
+# Say it where it happens, not only in a design document nobody reads while a
+# build is running.
+#
+# link-widevine.sh already warns that the CDM is proprietary and that
+# redistributing it needs a licence from Google. What nothing said until now is
+# that the bundle sitting in the output directory CONTAINS it — 20 MB of
+# unredistributable binary, staged there by the build that just finished,
+# because the args asked for it.
+if grep -q '^ *bundle_widevine_cdm *= *true' "$SRC/$OUT/args.gn" 2>/dev/null; then
+  CDM="$SRC/$OUT"/*.app/Contents/Frameworks/*.framework/Versions/*/Libraries/WidevineCdm
+  if compgen -G "$CDM" > /dev/null 2>&1; then
+    cat >&2 <<EOF
+
+!! This bundle contains the Widevine CDM.
+
+   $(du -h $CDM 2>/dev/null | tail -1 | cut -f1) of proprietary binary, staged out of the Google Chrome installed on
+   this machine. Using a copy already licensed onto your own machine is one
+   thing; passing the bundle to anyone else is redistribution, and that needs a
+   licence from Google.
+
+   Do not upload, publish or hand on this .app. For a build you can give away,
+   use browser/args/macos-arm64.gn — and read the note in it first, because a
+   build without Widevine answers requestMediaKeySystemAccess differently from
+   real Chrome, which is its own problem.
+
+   See NOTICE section 5 and docs/10-legal-licensing.md.
+EOF
+  fi
+fi
+
+if [ "$TARGET" = "macos-arm64" ] && [ -d "$SRC/out/macos-x64.noindex" ]; then
+  cat <<EOF
+
+Both macOS slices present. Merge them with Chromium's own universalizer:
+
+  python3 "$SRC/chrome/installer/mac/universalizer.py" \\
+    "$SRC/out/macos-arm64.noindex/Fury.app" \\
+    "$SRC/out/macos-x64.noindex/Fury.app" \\
+    "$SRC/out/macos-universal.noindex/Fury.app"
+
+NOT lipo on the main executable. That advice used to be here and it is wrong
+for this bundle: lipo would merge one 76 KB launcher and leave the 540 MB
+framework, five helper applications and every dylib single-architecture. The
+result runs on the machine it was built for and, on the other one, fails to
+load its own framework — a bundle that looks universal and is not.
+
+universalizer.py walks both trees and merges every Mach-O file it finds, which
+is why Chromium ships it.
+
+EOF
+fi

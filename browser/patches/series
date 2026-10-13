@@ -1,0 +1,798 @@
+# Patch series, applied in this order by core/build/apply.sh.
+#
+# One patch = one fingerprint vector. Never mix vectors in a single patch:
+# at rebase time a conflict must be localisable to a named concern.
+#
+# Numbering:
+#   0001-0009  infrastructure (config plumbing)
+#   0010-0199  JS / DOM vectors
+#   0200-0299  network layer
+#   0300-0399  automation traces
+#   0900-0999  branding, de-Googling
+#
+# Lines starting with '#' are comments; blank lines are ignored.
+# A '!' suffix marks a patch as expected-to-conflict on rebase (touches a hot
+# upstream file) so rebase.sh can warn early.
+
+# --- infrastructure ---------------------------------------------------------
+# Everything below depends on this. It carries the fingerprint config from the
+# agent into the browser process and out to EVERY renderer, worker and worklet.
+#
+# Config travels in read-only shared memory; argv carries only an opaque handle,
+# via base::shared_memory::SharedMemorySwitch — the mechanism Chromium already
+# uses for field trials. Verified on M150: one value set in the JSON appears
+# identically in the main frame, a Worker and three kinds of iframe, with zero
+# cross-context disagreements.
+#
+# THREE switches, and the third one is not redundancy:
+#
+#   --fury-fp-fd            browser, POSIX     an inherited descriptor
+#   --fury-fp-file-handle   browser, Windows   an inherited HANDLE
+#   --fury-fp-handle        children, both     a shared memory region
+#
+# The last two look interchangeable and are not. During the Windows launcher
+# port the carrier was about to be given the name --fury-fp-handle, which the
+# browser does not read in the browser process — its branch there reads the
+# other two — and which it then APPENDS itself, once per child, on top of a
+# switch that was already set. Every Windows profile would have launched with no
+# persona at all and nothing in the agent, the browser or any log would have
+# said so. Found by reading this patch while writing its Windows branch.
+#
+# InitializeInBrowser takes base::File rather than an int so both slots share
+# one read. The Windows half has never been run: there is no Windows core.
+0001-fp-config-plumbing.patch!          # content_main_runner_impl.cc moves often
+
+# --- navigator & friends ----------------------------------------------------
+# 0010 covers the Blink side plus the Accept-Language header, which is built in
+# //net from a profile preference rather than from navigator.languages —
+# measured, not assumed: patching only Blink left a profile set to en-US,en
+# still sending "Accept-Language: ru-RU,ru;q=0.9".
+0010-navigator-basic.patch
+# 0011 owns user_agent_utils.cc entirely: the UA string and the Client Hints
+# must never be applied separately, or the header claims one version while JS
+# claims another. GetUserAgentMetadata() is the single source for the
+# Sec-CH-UA-* headers AND navigator.userAgentData, so the override lives there
+# and nowhere else.
+0011-navigator-ua-data.patch!          # user_agent_utils.cc changes most releases
+0012-navigator-hardware.patch          # first real consumer of 0001
+# NOT NEEDED. Measured 31.07.2026: our build's navigator.plugins and
+# navigator.mimeTypes are byte-identical to real Chrome 150's — 5 entries, same
+# strings. Since Chrome 94 the list is hardcoded and the same on every install,
+# so it carries no per-machine entropy at all. Patching it would make us DIFFER
+# from Chrome, which is the opposite of the goal.
+# 0013-navigator-plugins.patch
+
+# --- layout & display -------------------------------------------------------
+# Screen::GetRect() is the single choke point for width, height, availWidth,
+# availHeight, availLeft and availTop — overriding them one getter at a time
+# would allow an availWidth larger than width.
+#
+# outerHeight is DERIVED from the real innerHeight plus a configured chrome
+# height, never set outright: innerHeight is the actual viewport and page layout
+# depends on it, while outerHeight - innerHeight is the OS tell. Phase 0
+# measured 143 px on a clean build against 87 px on real Chrome.
+#
+# CSS asks too, and for a month it got the host's answer. device-width,
+# device-height, resolution and color are computed in media_values.cc straight
+# from ScreenInfo, never through Screen, so a persona's screen.width of 1920
+# sat beside matchMedia('(device-width: 1470px)') on this Mac. The "zero
+# differences" that retired 0100 below compared Fury and Chrome on ONE machine
+# with no persona screen — true, and not the question. Measured 27.09.2026 on
+# 0.2.2: fv.pro "screen is not real", iphey eagle + pineapple; both gone once
+# media_values.cc read the same config. verify-0020 checks the agreement.
+0020-screen-window.patch
+# Width and overlay mode must move together: an overlay scrollbar reserves no
+# layout space, so a configured width that layout never reserves is not a width
+# at all and the page still measures 0.
+#
+# THREE themes and the choice between them, not one file. The note here used to
+# say "macOS only for now, the Windows build needs the same two overrides in
+# scrollbar_theme_aura.cc / scrollbar_theme_fluent.cc", and that was two thirds
+# of the truth. ScrollbarTheme::NativeTheme() in scrollbar_theme_aura.cc picks
+# between Fluent, Overlay and Aura, and ScrollbarThemeOverlay::
+# UsesOverlayScrollbars() returns true unconditionally — so patching the two
+# themes and leaving the chooser alone would have measured 0 on any Windows or
+# Linux build with overlay scrollbars on, with both patched themes correct and
+# unreached. The override sits at the selection point, because the guarantee is
+# about which theme runs; spread across themes it is one statement per theme and
+# the next theme Chromium adds carries none of them.
+#
+# `scrollbar-width: thin` reports TWO THIRDS, and the first version of this
+# patch returned the configured number for both values. Every real browser makes
+# the distinction — macOS keeps 15 for auto and 11 for thin in its own table,
+# Aura multiplies by Proportion() — so a page that set one CSS property got the
+# same answer from us twice and had us. Fixed in all three.
+#
+# STATE, said exactly. The macOS side is written, compiled and measured:
+# core/verify/verify-0021.py, seven checks, auto 17 / thin 11 / none 0, an
+# iframe agreeing, a width of 0 restoring overlay, and an unconfigured build
+# reporting the host's own 0 so the others mean something.
+#
+# The Windows side is WRITTEN AND NOT COMPILED. scrollbar_theme_aura.cc and
+# scrollbar_theme_fluent.cc are not in the macOS build at all — the output
+# directory holds scrollbar_theme_mac.o and no sibling — so this code has not
+# been through a compiler, let alone a browser. It is the first thing to run
+# verify-0021.py against on a Windows machine, and it is not "done" until that
+# has happened.
+0021-scrollbar-width.patch
+
+# --- graphics ---------------------------------------------------------------
+# Noise is applied at READBACK, never at drawing — the canvas keeps rendering
+# what the page asked for. getImageData() and toDataURL()/toBlob() go through
+# different code paths but call the SAME function on the same absolute
+# coordinates, so a pixel read one way matches the same pixel read the other.
+#
+# The perturbation is a pure function of (seed, absolute x, absolute y): no
+# counter, no randomness. A detector reads the canvas twice and compares, and
+# unstable noise is a stronger signal than no noise at all.
+#
+# And only where machines differ. A canvas holding solid, opaque,
+# pixel-aligned rects is byte-identical on every machine, so noise on it hides
+# nothing and is the one thing a detector can check exactly: fv.pro reads back
+# an 8x8 grid of random 1x1 fills, pixelscan fourteen solid rects through
+# toDataURL. Both flagged 0.2.2 for it (27.09.2026). The host now carries a
+# mark set by the first draw a machine renders its own way — text, a path, an
+# image, a blur, a blend — and cleared by reset; all three readbacks ask it.
+# WebGL and every other context keep their noise unconditionally.
+#
+# And shaped like a rasteriser, not like salt (29.09.2026). Noise now moves
+# coverage at antialiased edges, in premultiplied space, and blends inside
+# opaque content; it never paints a single-colour glyph's interior another
+# colour and never moves a flat area. An unscaled drawImage of a decoded
+# <img> counts as an exact copy. Measured on the Windows box: with 2D noise
+# alone pixelscan says "No masking detected". fury_flat.h holds the rule.
+#
+# toBlob() was a hole until then: on the main thread it encodes progressively
+# from the source pixels and never reached ImageDataBuffer, so it returned the
+# REAL canvas beside a noised toDataURL(). CanvasAsyncBlobCreator now noises
+# its source once, before any of its three encoding paths.
+0030-canvas-noise.patch
+# Intercepts once at the top of getParameter() rather than in each of its ~80
+# switch arms: patching them individually guarantees some are missed at the next
+# rebase, and one un-spoofed limit contradicts every spoofed one around it.
+# readPixels noise lives here too — spoofing the renderer string while leaving
+# the rendered pixels real would be pointless, the pixels are the harder
+# fingerprint.
+#
+# readPixels noise is coverage at edges only (29.09.2026). Noise in a smooth
+# shaded ramp is what pixelscan caught -- "Masking detected" with WebGL noise
+# alone -- so a scene that is all ramp and no edge now reads back as the
+# machine renders it, the same for every profile there. Edged scenes, which
+# is what fingerprinting draws, still differ per seed (measured).
+0031-webgl-params.patch!         # webgl_rendering_context_base.cc is hot!
+# Limits are driven by the same SUPPORTED_LIMITS X-macro the getters use, so a
+# limit Chromium adds upstream is covered the moment it appears in that list.
+#
+# Features may only be NARROWED, never widened: removing one is honest, because
+# requestDevice() then fails exactly as it would on hardware that lacks it.
+# Adding one would advertise a capability the driver cannot provide and fail in
+# a way no real machine fails — worse than the leak it was meant to close.
+0032-webgpu-adapter.patch!             # WebGPU is still moving fast upstream
+0033-client-rects.patch
+# WebGL2's own limits, shader precision, and a WebGL2 extension list. 0031 covers
+# the WebGL1 limits; a WebGL2 context answers its limits before reaching that
+# code, and getShaderPrecisionFormat was never covered, so on Linux in a
+# container both came from SwiftShader under an Apple renderer string. Measured
+# 09.10.2026 against Chrome 154 on an M5 Mac: 17 WebGL2 limits and every lowp and
+# mediump precision differed, and a bot-check sensor carried the WebGL2 limits.
+0034-webgl2-limits-precision.patch
+
+# --- audio ------------------------------------------------------------------
+# Silence and flat runs are left exact: an unconnected oscillator renders zeros
+# on every machine, and fv.pro checks exactly that (100 samples of a 0 Hz
+# oscillator, 27.09.2026). Every sample of a moving signal is still perturbed.
+0040-audio-noise.patch
+0041-speech-voices.patch
+# The persona's voice list when the machine has none. A Linux container has no
+# voices and a Mac has around 200; a bot-check sensor carried both the count and a
+# hash of the names. Widens, unlike 0041, and only when the list is empty.
+0042-speech-synthetic-voices.patch
+
+# --- fonts ------------------------------------------------------------------
+# Filters at the fallback layer, not just the enumeration API — measurement
+# through canvas bypasses any list-only filter.
+#
+# A blocklist now, not an allowlist (29.09.2026): "fontsHidden" names what the
+# persona is known not to have -- probed and absent, or another OS's own --
+# and wins over "fonts". The allowlist hid every family the capture never
+# probed, Helvetica, Times and PingFang on a real Mac among them, and alone
+# made pixelscan say "Masking detected" and iphey "roadmap". shared-rs
+# fonts.rs builds the list.
+0050-font-fallback-filter.patch
+
+# --- devices ----------------------------------------------------------------
+# Narrows the device list to the persona's counts. Narrowing only, like WebGPU
+# features (0032) and fonts (0050): dropping a device is honest because
+# getUserMedia then fails as it would on a machine without one, while
+# advertising a camera that is not there fails in a way no real machine fails.
+0060-media-devices.patch
+#
+# NOT NEEDED. Measured 02.08.2026 against real Chrome 150.0.7871.187 — the same
+# version this tree forks — with a fresh capture of both browsers:
+# baselines/chrome150-fresh.json and fury150-fresh.json. The probe covers 14
+# mime/codec pairs through BOTH canPlayType and MediaSource.isTypeSupported,
+# plus MediaRecorder's type list and a proprietary-codec flag. 28 fields. Zero
+# differences. H.264, AAC, HEVC, AV1, VP8, VP9, FLAC, Opus, Vorbis, Theora — all
+# identical, including the ones a Chromium build normally lacks.
+#
+# proprietary_codecs=true and ffmpeg_branding="Chrome" in core/args did the
+# entire job, and enable_widevine closed com.widevine.alpha. There is nothing
+# left to patch, and patching would make us DIFFER from Chrome — which is how
+# 0013 plugins and 0100 CSS media features were retired.
+#
+# One caution recorded for anyone who revisits: a codec list on a given
+# OS + Chrome version is the same for every user, so it carries no per-machine
+# entropy to spoof in the first place. Narrowing it per persona would not hide a
+# profile in a crowd, it would remove it from one.
+# 0061-media-codecs.patch
+
+# --- webrtc -----------------------------------------------------------------
+# The most serious hole the product had, and it was hiding behind a switch that
+# looked like the fix.
+#
+# launcher.rs passed --force-webrtc-ip-handling-policy=disable_non_proxied_udp on
+# every launch, with a comment explaining exactly what it prevented. In M150 that
+# switch is read by content/shell/browser/shell.cc:127 and by browser tests, and
+# by nothing in //chrome. Chrome takes the value from a profile preference,
+# renderer_preferences_util.cc:157, and only from there.
+#
+# Measured 02.08.2026, which is how it was found. Our build with a proxy set and
+# that switch present, a page opening an RTCPeerConnection: types
+# {host: 1, srflx: 1}, the srflx candidate carrying this machine's real public
+# address. Real Chrome 150 does the same, and parity is no defence here — an
+# anti-detect browser whose premise is that the site sees the proxy, handing the
+# operator's real IP to any page with four lines of JS, is failing at the one
+# thing it exists for. Every profile on the machine handed over the same address,
+# so it also linked them all to each other.
+#
+# So: override the preference. THREE fields, because the policy alone is not
+# enough — webrtc_ip_handling_urls overrides it per-URL (renderer_blink_platform_
+# impl.cc:670-675 breaks out of its loop on the first match and discards the
+# policy) and webrtc_local_ips_allowed_urls turns off mDNS obfuscation for
+# matching pages, replacing the .local name with the real private address. Both
+# are empty on our profiles; both are cleared anyway, because a patch whose
+# correctness depends on a preference nobody has set yet is not correct.
+#
+# And a guard, because ToWebRTCIPHandlingPolicy returns kDefault for any string
+# it does not recognise (webrtc_ip_handling_policy.cc:33) with no error. A typo
+# would not fail, it would leak — kDefault is the setting that gathers
+# everything. A value that asked for something and got kDefault is refused loudly
+# instead.
+#
+# The resulting browser gathers NOTHING — no host candidate, no srflx,
+# iceGatheringState "complete". That looked wrong, and it is not: real Chrome
+# 150, unpatched, given only {"webrtc": {"ip_handling_policy":
+# "disable_non_proxied_udp"}} in its Preferences, reaches exactly the same state.
+# It is what the enterprise policy that exists to stop WebRTC IP leaks does on
+# real corporate machines. Verified in core/verify/verify-0070.py, 5 claims,
+# including that an unconfigured build still leaks — a control that passes when
+# broken is not a control.
+0070-webrtc-policy.patch!
+
+# --- time & locale ----------------------------------------------------------
+0080-timezone-icu.patch
+# WRITTEN, after being wrongly retired. The reasoning that retired it was that
+# --lang already sets ICU's default locale in every process, traced through
+# chrome_command_line_pref_store.cc:50, render_process_host_impl.cc:3734 and
+# chrome_main_delegate.cc:1449. The trace was right about Windows and wrong
+# about macOS, and reading it was not the same as running it.
+#
+# Measured on a build of this tree: with --lang=de and the German resources
+# present and loaded, Intl.DateTimeFormat().resolvedOptions().locale reported
+# "ru" — the host's own language — and (123456.789).toLocaleString() came out
+# "123 456,789". With this patch the same build reports "de" and "123.456,789".
+#
+# Shaped exactly like 0080, and called next to it: LocaleController is
+# Chromium's own answer to "make every context agree on a locale", and it
+# notifies each isolate and every worker thread. A locale set on the main
+# thread alone is a contradiction a page finds inside a Worker in one line.
+#
+# The launcher still passes --lang. That is not redundancy: the browser's own
+# UI language should match what the profile claims, and a German exit whose
+# menus are in Russian is a seam of its own. --lang decides the chrome, this
+# decides the fact a page can read.
+0081-intl-locale.patch
+#
+# Where the profile says it is, taken from where its proxy comes out.
+#
+# NOT written against Blink, and NOT device.mojom.GeolocationContext::SetOverride
+# (what CDP Emulation.setGeolocationOverride and WebDriver BiDi drive). That
+# override freezes position.timestamp at the instant it was set and delivers one
+# position per binding before going silent, which starves watchPosition() in a
+# way no real device does.
+#
+# The seam is one layer lower: ContentBrowserClient::OverrideSystemLocation
+# Provider(), wired into the in-process device service at
+# content/browser/device/device_service.cc:109. A provider there sits where
+# CoreLocation and the network provider sit, so the caching, the QueryNextPosition
+# handshake and every failure path stay stock Chromium.
+#
+# THE PART THAT IS NOT OBVIOUS, and without which the patch applies, links and
+# does nothing: on macOS and Windows the OS has its own location permission and
+# Chromium asks it FIRST. GeolocationProviderImpl::OnClientsChanged returns
+# before starting any provider while that status is not kAllowed
+# (geolocation_provider_impl.cc:297-300), so on a Mac that has never granted
+# this binary Location Services access, the custom provider is constructed,
+# started, and never asked for anything — every call ends in "Timeout expired".
+# So the patch also returns nullptr from GetGeolocationSystemPermissionManager()
+# when a position is configured, which makes that constructor take its other
+# branch and record kAllowed. Both decisions read the same predicate,
+# FuryLocationProvider::ConfiguredFix: on Apple the platform provider CHECKs the
+# manager is present, and it is only unreachable because a custom provider
+# forces kCustomOnly. Suppress the manager without supplying a provider and the
+# browser crashes the first time a page asks where it is.
+#
+# The provider does NOT gate delivery on OnPermissionGranted, though the header
+# contract says to (location_provider.h:37-40). That callback traces back to
+# UserDidOptIntoLocationServices, which only fires when a user clicks the
+# permission bubble — a page granted geolocation over CDP never walks that path,
+# so the latch stays false and nothing is delivered, forever. Chromium's own
+# macOS provider makes the same call: CoreLocationProvider::OnPermissionGranted
+# is "// Nothing to do here." The permission that protects the user is a layer
+# above and untouched; the denied case is a check in verify-0082.py.
+#
+# It repeats every second, which is not a heartbeat for its own sake: Blink keeps
+# one QueryNextPosition outstanding per frame, so a getCurrentPosition issued
+# while a watchPosition is open waits for the NEXT update. Emitting once left it
+# hanging — measured, then fixed, then measured again.
+#
+# On the jitter question the old note raised: no jitter, and that is what
+# upstream does. NetworkLocationProvider caches by WiFi AP set and on a hit
+# re-sends the identical coordinates with only the timestamp refreshed
+# (network_location_provider.cc:283-289). A stationary desktop repeats itself.
+0082-geolocation.patch
+
+# --- permissions ------------------------------------------------------------
+# Touches TWO files, and they must never be split. Overriding only the
+# Permissions API produced query="denied" against Notification.permission=
+# "default" — a genuine contradiction, and exactly the headless tell this check
+# exists to catch. Found by measurement after the first version shipped.
+#
+# Substitutes only while the real permission is still undecided. Unconditional
+# was the first version and 0082 is what made it a lie: with geolocation
+# actually answering, a site could prompt, watch the user click Allow, receive a
+# position, and read "prompt" back from permissions.query in the same page. A
+# persona describes the profile nobody has answered a prompt in; it does not get
+# to overrule an answer the user gave.
+0090-permissions-consistency.patch
+
+# --- css --------------------------------------------------------------------
+# NOT NEEDED FOR PARITY. Measured: zero differences across all 21 media
+# features we probe — with no persona screen. The four that describe the
+# screen (device-width/-height, resolution, color) DO differ under a persona
+# and are handled in 0020, beside the Screen values they must agree with. prefers-color-scheme is genuinely per-user and would let
+# two profiles on one machine be correlated — but it carries about one bit, and
+# spending a patch plus its rebase cost on one bit is the wrong trade while
+# higher-entropy vectors remain. Revisit if a persona ever needs to claim a
+# light-mode desktop from a dark-mode host.
+# 0100-css-media-features.patch
+
+# --- storage ----------------------------------------------------------------
+# Derives the os_crypt key from the profile's own key instead of the machine's
+# keychain, so the cookie ciphertext inside a bundle can be read wherever the
+# bundle can be opened.
+#
+# WRITTEN. Three things it had to get right, each of which would otherwise have
+# produced a patch that applies cleanly and does nothing:
+#
+#   IsCompatibleWithOsCryptSync() must be TRUE. The main cookie jar takes its
+#   encryptor with Option::kNone and so follows precedence, but extension
+#   cookies, the password reuse manager, the GCM driver and the device OAuth2
+#   token store all ask with kEncryptSyncCompat — a slot only providers
+#   answering true ever fill. False would leave all four on the machine key.
+#
+#   AES-256-GCM, not the AES-128-CBC the platform providers use. GCM is
+#   authenticated, so a wrong key fails cleanly; CBC will unpad garbage and
+#   leave the cookie store to notice via its SHA-256(domain) check — after
+#   which it still deletes the whole eTLD+1 group.
+#
+#   The key travels on its own descriptor, never in the fingerprint config.
+#   That config is republished into shared memory for EVERY child process
+#   including renderers, and the renderer is the one process on the machine
+#   that runs the visited site's code.
+#
+# What this patch does NOT fix: a key that is simply wrong still destroys the
+# jar, because net::CookieCryptoDelegate::DecryptString takes no flags and has
+# no way to say "unavailable" rather than "corrupt". That case is caught in the
+# agent instead — it records the key's fingerprint beside the profile and
+# refuses to launch on a mismatch, which is the only answer that leaves the
+# data intact.
+#
+# --fury-oscrypt-fd on POSIX, --fury-oscrypt-file-handle on Windows, same
+# reasoning as 0001 and the same naming rule. Unlike 0001 a missing key here is
+# NOT fatal: the profile falls back to this machine's own OS-crypt key, which
+# costs a cookie jar the browser discards and re-earns at the next login, where
+# a browser that refuses to start costs the session outright. The Windows half
+# has never been run.
+0110-os-crypt-key.patch
+
+# --- misc js ----------------------------------------------------------------
+0120-performance-memory.patch
+# Was one entry for two APIs. They are two vectors and the house rule says one
+# patch per vector — and the two verdicts came out opposite, which settles it.
+#
+# BATTERY: needed, and needed for a reason a parity check cannot see. Measured
+# 02.08.2026 against real Chrome 150.0.7871.187: both browsers answered
+# navigator.getBattery() with charging=false, level=0.60, chargingTime=Infinity,
+# dischargingTime=34680 — identical to the second, because both were reading
+# this MacBook. Parity is perfect. Parity is also worthless: every profile on one
+# host reads the same numbers at the same instant, and dischargingTime is a raw
+# seconds count that ticks down, so two profiles opened minutes apart report
+# values differing by exactly the elapsed time. That links accounts that a
+# separate proxy and a separate canvas seed were keeping apart.
+#
+# The tuple substituted is BatteryStatus's own default (battery_status.h:23-24)
+# and what every desktop on mains reports — the largest population there is,
+# carrying no entropy at all. A laptop left plugged in reports it too, so it
+# contradicts no persona in the catalogue.
+#
+# The seam is BatteryDispatcher::OnDidChange, and the wrong seam is loud rather
+# than quiet. Override the four getters in battery_manager.cc instead and the
+# values sit still while battery_manager.cc:115-122 keeps comparing the REAL
+# statuses and keeps firing levelchange and chargingchange off the host's cell —
+# a page that listens and watches level never move has found something far
+# louder than the leak. Substituting the status the dispatcher publishes leaves
+# nothing to fire on, because there is genuinely no change. That is the last
+# check in verify-0121.py and it is the one that distinguishes the two.
+#
+# Through the BatteryStatus constructor rather than into battery_status_, so the
+# level goes through EnsureTwoSignificantDigits exactly as a real one does: a
+# value that skipped it could report a level no Chrome can produce, which is
+# evidence of tampering rather than a failed disguise.
+0121-battery-status.patch
+#
+# NETWORK INFORMATION: NOT NEEDED, and this one is a finding rather than a
+# shortcut. rtt and downlink are not leaking the host — they are Chrome's own
+# designed noise. GetRandomMultiplier (network_state_notifier.cc:370-383) draws
+# a per-renderer-process salt once and multiplies both by one of 21 values in
+# [0.90, 1.10], then rounds to 50 ms and 50 kbps buckets. Across all 29 captures
+# in tools/detect-suite/baselines, downlink takes exactly seven values (1.45
+# through 1.75 in 0.05 steps) and rtt takes 100, 150 or 200; effectiveType is
+# "4g" in every single one, ours, Chrome's and AdsPower's alike. Real Chrome's
+# 1.5 and our 1.7 are two draws from one distribution.
+#
+# Pinning them per profile would REMOVE variance that real Chrome has: a profile
+# whose navigator.connection.rtt is identical across reloads while Chrome's moves
+# is a NEW tell, which is the argument verbatim that retired 0200/0210/0220 for
+# JA3. Same reasoning disposes of --force-effective-connection-type.
+#
+# If it is ever revived: NetworkInformation is Exposed=(Window,Worker), so a
+# patch would have to cover workers or produce exactly the cross-context
+# disagreement probe.js exists to catch — a cost battery does not carry, since
+# BatteryManager is Window-only.
+# 0122-network-information.patch
+
+# --- network ----------------------------------------------------------------
+# NOT NEEDED FOR PARITY, and removing them from the plan is a finding rather
+# than a shortcut. Verified against M150 source on 31.07.2026:
+#
+#   SSL_set_permute_extensions(ssl_, 1)   extension order is randomised per
+#                                         connection, so real Chrome has no
+#                                         stable JA3 to match
+#   SSL_CTX_set_grease_enabled(ctx_, 1)   further per-connection variation
+#   SSL_set_strict_cipher_list             called, but with BoringSSL's default
+#                                          list plus whatever an enterprise
+#                                          policy disabled — so on a stock
+#                                          config the suites are the defaults
+#
+# Re-verified 05.08.2026 against the tree, line by line, when docs/16 proposed
+# reviving this from a competitor's feature list:
+#   net/socket/ssl_client_socket_impl.cc:879  SSL_set_permute_extensions(ssl_.get(), 1)
+#   net/socket/ssl_client_socket_impl.cc:207  SSL_CTX_set_grease_enabled(ssl_ctx_.get(), 1)
+#   net/socket/ssl_client_socket_impl.cc:770  the cipher command is built from
+#                                             config().disabled_cipher_suites,
+#                                             empty by default
+#
+# The earlier note said set_cipher_list was "never called", which was wrong in
+# wording and right in substance. Corrected rather than left, because this file
+# is the design record and a claim in it gets believed.
+#
+# Our build is the same Chromium with the same BoringSSL on the same code path,
+# so its ClientHello is already indistinguishable from Chrome 150's. Pinning a
+# JA3 per profile would make us LESS Chrome-like, not more.
+#
+# These become necessary only to impersonate a different browser or major
+# version, which is a separate goal from parity. The same argument applies
+# verbatim to HTTP/2 SETTINGS and header order.
+#
+# 0200-tls-ja3.patch
+# 0210-http2-settings.patch
+# 0220-header-order.patch
+#
+# The real network work is NOT in the core: it is QUIC and WebRTC through the
+# proxy relay (agent/src/relay.rs). Chrome uses QUIC; launcher.rs currently
+# passes --disable-quic because UDP would bypass an HTTP relay, and that is our
+# own deviation from Chrome. Closing it needs SOCKS5 UDP ASSOCIATE in the relay,
+# not a Chromium patch. See docs/05.
+# NOT A PATCH, and the reasoning matters more than the outcome.
+#
+# --disable-quic in launcher.rs already lands on the identical field a patch
+# would set, so a patch here is redundant rather than wrong. What must NOT be
+# recorded is "we are at parity". We are not: real Chrome 150 negotiates HTTP/3
+# with any server that offers it, and Fury never does. That is a real, unfixed
+# deviation, visible server-side to anyone advertising alt-svc and watching
+# whether the client ever upgrades.
+#
+# It is owned by the proxy architecture, not by the core. relay.rs speaks HTTP
+# CONNECT and SOCKS5 CONNECT, both TCP; QUIC is UDP and would go around it,
+# which is the same hole 0070 just closed for WebRTC.
+#
+# And the exit is not blocked by design, which an earlier note claimed. QUIC
+# proxying is gated on ONE GN default: net/features.gni:70 sets
+# enable_quic_proxy_support = is_debug, and our args set is_debug = false. The
+# MASQUE client (RFC 9298, UDP over HTTP/3) is compiled into the binary
+# unconditionally — net/BUILD.gn lists quic_proxy_datagram_client_socket.{cc,h}
+# with no buildflag guard — and pref_proxy_config_tracker_impl.cc already passes
+# allow_quic_proxy_support through conditionally. So the road out is a GN arg
+# plus a MASQUE-capable relay, not a Chromium patch and not SOCKS5 UDP ASSOCIATE.
+# 0230-disable-quic.patch
+
+# --- automation traces ------------------------------------------------------
+0300-remove-cdc-vars.patch
+# NOT WRITTEN, and blocked on a boundary rather than on effort.
+#
+# What was measured first, because three of the four candidate tells turned out
+# not to exist. On M150, with and without Runtime.enable, in our build AND in
+# real Chrome 150: a getter on a logged object never fires, a getter on
+# Error.prototype.stack never fires, and console.log of a regexp calls toString
+# in every configuration including no-CDP — so it is not a CDP tell at all. The
+# classic "Runtime.enable detection" does not reproduce.
+#
+# What DOES reproduce is timing, and it was measured again on 04.08.2026 in more
+# detail, because "about thirteen times" is a number you cannot act on. Fury 150,
+# microseconds per console.debug, median of seven runs of four hundred
+# (tools/detect-suite/cdp-timing.py):
+#
+#                                "hello"   50-key   800-key
+#     no debugger                   3.0      2.8      2.8
+#     CDP attached, Runtime off     2.8      2.8      2.8
+#     CDP attached, Runtime on      8.0     14.0     25.5
+#
+# Three things that the single ratio hid.
+#
+# Attaching is free. The whole cost arrives with Runtime.enable, which every
+# driver calls — so what leaks is "a driver is attached", not "a debugger is".
+#
+# The cost is a FIXED part plus a SIZE part. The size part is preview generation
+# in wrapArguments(session, generatePreview) and a patch could remove it. The
+# fixed part — 2.7x on a five-character string — is the message reaching the
+# frontend at all, and removing that means not delivering
+# Runtime.consoleAPICalled, which is the console.
+#
+# So a patch here shrinks the tell and cannot close it, and a patch that applies
+# and still leaks is the exact failure mode this file exists to prevent. Not
+# written. Identical in real Chrome, so it detects a driven browser rather than
+# Fury — which is no comfort when the driven browser is the operator's.
+#
+# The one substantive leak found is narrower: console serialisation of an Error
+# reads .stack, which runs the page's Error.prepareStackTrace. It cannot be
+# closed from Blink. The preview path reads the property through
+# value-mirror.cc's own object->Get, which no embedder hook intercepts — a
+# Blink-side valueSubtype override covers descriptionForError and NOT the
+# preview, so a patch there applies, compiles, links and still leaks. The only
+# layer covering both readers is v8/src/inspector, and //v8 is a separate
+# gclient project with no path to //components/fury: fury::FuryConfig::Get()
+# would not link, and no patch in this series touches v8/ today.
+#
+# So it needs either a v8 patch with its own config channel, or a decision that
+# an operator driving a profile over CDP accepts a timing tell. Written down
+# rather than half-done: a patch that applies and leaks is the failure mode this
+# file exists to prevent.
+# 0301-runtime-enable-detect.patch
+# Until this patch, LaunchRestrictions::lock_devtools was a hidden button.
+# launcher.rs pushed --fury-lock-devtools on every restricted launch; grep over
+# core/src returned zero occurrences of it. docs/04 insists the restriction must
+# be technical rather than a UI choice, and it was a UI choice — an operator
+# forbidden from taking a profile's data home could open DevTools and read the
+# cookies out of it.
+#
+# FIVE guard points, and the first version had two. The two it had —
+# GetEffectiveAvailability and GetDevToolsAvailabilityForUrl — passed a test
+# that showed CDP being refused, and left the profile-file bypass wide open:
+# IsInspectionAllowed(profile, extension=nullptr), on kDisallowed, reads
+# prefs::kDeveloperToolsAvailabilityAllowlist STRAIGHT off the profile and
+# returns true when it is non-empty, never touching the policy checker. That
+# preference lives in the Preferences JSON inside the user-data-dir — the one
+# file the restricted operator is certain to have. One line in it and DevTools
+# came back. So the guard now sits on all five IsInspectionAllowed entry points,
+# ahead of any preference, and the bypass is a check in verify-0302.py: launch
+# locked, write {"devtools": {"availability_allowlist": ["*"]}} into the profile,
+# and it must still refuse.
+#
+# Enforced at the READ, not by seeding prefs::kDevToolsAvailability: that
+# preference lives in the Preferences JSON inside the user-data-dir, which is
+# exactly what the restricted operator has a copy of. argv cannot be changed
+# after the browser starts; a file in the profile can be edited between
+# launches.
+#
+# It lands in DevToolsAgentHostImpl::AttachInternal, which every session goes
+# through — so one guard covers --remote-debugging-port, --remote-debugging-pipe
+# and chrome.debugger together, and the endpoint refusing per-attach rather than
+# refusing to listen is the same shape Chrome's own policy produces.
+#
+# What it does NOT stop, said plainly because an undocumented limit gets trusted
+# past: an operator who has the binary can relaunch it by hand without the
+# switch. That is the threat model in docs/04 — a dishonest employee with a
+# profile, not one with root on the machine.
+#
+# The switch string is written independently in Rust and in C++ and nothing
+# checks the two against each other, so verify-0302.py spells it the Rust way on
+# purpose. A drifted name fails open, silently, forever.
+0302-devtools-lock.patch               # honours LaunchRestrictions.lock_devtools
+# Split out of 0302 rather than riding inside it: different vector, disjoint
+# files, and one patch per vector is what keeps a rebase conflict localisable.
+# lock_data_export was the other switch launcher.rs pushed into the void.
+#
+# THREE refusals, and the third is what makes the first two worth having. The
+# CSV export (PasswordManagerPorter::Export) and the bookmark HTML export
+# (bookmark_html_writer::WriteBookmarks) are the obvious bulk paths, and each is
+# refused at the function that does the work rather than at the button that
+# starts it — the settings page reaches both over Mojo, and a replayed message
+# or an extension holding the permission reaches them with no button at all.
+#
+# The third is PasswordsPrivateDelegateImpl::RequestPlaintextPassword. Reading
+# credentials out one at a time is the same leak as exporting them in a batch,
+# only slower, and it is reachable from chrome://settings whether or not
+# chrome://password-manager is disabled — _api_features.json exposes
+# passwordsPrivate to both hosts. Blocking the WebUI host alone would have
+# demoed perfectly and protected nothing.
+#
+# NOT VERIFIED on a running browser, and that is a gap rather than an omission:
+# all three paths are WebUI or extension surfaces a page cannot reach, so
+# core/verify has no way to drive them over CDP today. The build proves the
+# refusals compile into the binary; nothing yet proves they fire. Deliberately
+# not claimed as done.
+#
+# The file-download whitelist clause in docs/04 is NOT covered here. It is a
+# DownloadPrefs / download-target problem and belongs to its own number.
+0303-data-export-lock.patch
+
+# --- branding ---------------------------------------------------------------
+# WRITTEN and measured — see the paragraph beginning "WRITTEN." below, which is
+# the current state. This opening said "NOT WRITTEN, blocked on assets" for as
+# long as it took the icons to arrive, and then stayed after they did: the first
+# thing a reader saw contradicted the same block twelve lines down. Kept as
+# background rather than deleted, because the reasoning still explains why the
+# patch is ten lines of a text file.
+#
+# The change is data, not source: chrome/app/theme/chromium/BRANDING is read by
+# build/util/branding.gni into chrome_product_full_name and the mac bundle id,
+# and everything macOS-facing derives from those — the .app, the .framework, the
+# helper bundles, CFBundleIdentifier, the runtime framework lookup, the crash
+# annotation. No file in chrome/BUILD.gn, app-Info.plist or chrome_constants.cc
+# needs touching. A second edit to chromium_strings.grd covers the About box and
+# chrome://version.
+#
+# What blocks it: the icons. chrome/BUILD.gn bundles app.icns AND Assets.car AND
+# Assets.xcassets/AppIcon.icon, and shipping a rename with Chromium's own icons
+# is worse than not renaming. Those are a design deliverable.
+#
+# THE RULE THAT GOVERNS THIS PATCH, written here so it cannot be lost: nothing a
+# PAGE can read may move. The user agent, navigator.appName, navigator.vendor
+# and the Sec-CH-UA brand list belong to 0011 and must keep saying Chrome.
+# Branding here means what the USER and the OPERATING SYSTEM see, and nothing
+# else. A rename that reaches a page is a detection vector, not branding.
+#
+# And a trap worth knowing before the first attempt: ninja does not delete
+# Chromium.app when the output name changes, so both bundles sit in the output
+# directory afterwards and anyone testing the old path reports that the patch
+# did nothing.
+#
+# WRITTEN. Ten lines of a text file, and everything macOS-facing follows:
+# build/util/branding.gni reads chrome/app/theme/chromium/BRANDING into
+# chrome_product_full_name, chrome_mac_bundle_id and chrome_mac_creator_code,
+# and chrome/BUILD.gn derives the .app name, the framework name, the four helper
+# bundles and CFBundleIdentifier from those. No source file needs touching.
+# Measured after building: Fury.app, Fury Framework.framework, four Fury Helper
+# bundles, CFBundleName "Fury", CFBundleIdentifier dev.fury.core.
+#
+# THE ICONS ARE NOT IN THIS PATCH. They are PNGs and an .icns, and a quilt
+# series carrying binaries is one nobody can read or rebase — the same argument
+# link-widevine.sh makes for the CDM. core/build/link-icons.sh copies them out
+# of assets/ before a build, and skipping it produces a browser called Fury
+# wearing Chromium's icons, which is worse than either.
+#
+# NOTHING A PAGE CAN READ MOVES, and that was checked rather than assumed. The
+# User-Agent product string is a hardcoded literal — version_info_with_user_agent
+# .h:21 returns "Chrome/" PRODUCT_VERSION — so the rename cannot reach it. The
+# Client Hints brand at user_agent_utils.cc:169 DOES read
+# version_info::GetProductName(), and it sits behind `#if !BUILDFLAG(
+# CHROMIUM_BRANDING)`, which is off in our build; patch 0011 replaces the whole
+# brand list from the config regardless.
+#
+# The trap this note existed to warn about is real: ninja does not delete
+# Chromium.app when the output name changes, so both bundles sit in the output
+# directory afterwards. Confirmed, and removed by hand.
+#
+# VERIFIED on the renamed build: eight contexts, zero disagreements, and the
+# release gate passes 13/13. navigator.userAgent still says Chrome/150.0.0.0 and
+# the brand list still says "Not;A=Brand/8,Chromium/150,Google Chrome/150" — the
+# rename reaches the bundle and stops there, which is the whole requirement.
+#
+# The first attempt at this failed with origin "null" and isSecureContext false
+# in every worker, which looked like the rename having broken something. It had
+# not: the collector serving probe.html was not listening at that moment, so the
+# browser was sitting on an error page, whose origin is null and which is not a
+# secure context — hence no navigator.serviceWorker and SecurityError from every
+# blob worker. Chasing it cost an hour, and the lesson is narrow and repeatable:
+# an "origin: null" in a capture means the page did not load, and the first
+# thing to check is the thing serving it.
+0900-branding.patch
+#
+# ONE LINE, and it closes the last endpoint the browser contacts on its own.
+#
+# Measured against the launch flags we already pass: --disable-background-
+# networking stops the Safe Browsing DATABASE downloading
+# (v4_update_protocol_manager.cc:106-109), but the per-download client report
+# still goes to a hardcoded sb-ssl.google.com URL that no API key gates. So the
+# browser has been protecting nothing while chrome://settings reported Standard
+# protection and while the pings kept leaving. Defaulting kSafeBrowsingEnabled
+# to false removes the traffic and the contradiction together.
+#
+# The pref and NOT the URL constant: download_protection_delegate_desktop.cc
+# CHECKs the constructed URL is valid, so blanking the constant crashes the
+# browser at startup. The pref is also the one gate that client-side phishing,
+# the ping manager, notification telemetry and password protection all read.
+#
+# It sets a DEFAULT. A profile whose Preferences already carry
+# safebrowsing.enabled keeps its own value — Fury creates profiles fresh, so the
+# default is what every new one gets.
+0901-disable-google-services.patch
+#
+# The "Google API keys are missing" bar, never shown. It is Chromium's note to
+# a developer that the build has no keys — true here, on purpose — but it sat
+# in the first window of every launch, in the profile's UI language, saying
+# "Chromium" to an operator whose browser is supposed to say Chrome. Real
+# Chrome has keys and never shows it: a window with the bar carries 56 px of
+# chrome a real one does not, which 0020 hides from the page and this removes.
+# Only this bar; the obsolete-OS warning and the bad-flags prompt are shown by
+# real Chrome under the same conditions and stay. Reported 21.09.2026 by a
+# Windows tester as "Google API-Schlüssel fehlen" above a German profile.
+0902-no-api-keys-infobar.patch
+
+# A profile's browser on macOS quits when its last window closes, as it does
+# on Windows. macOS Chrome stays running with no windows until Cmd+Q, held by
+# AppController's own keep-alive; for a browser the agent started, that left a
+# second icon in the Dock and a profile the agent still counted as open, so a
+# team profile's session did not reach the server until something else closed
+# it. Reported 08.10.2026 by a tester with two identical Fury icons in his
+# Dock, one of them a profile he had closed. The keep-alive is released once
+# the first window exists; nothing a page can observe changes. macOS only.
+0903-mac-quit-with-last-window.patch
+# The WebGPU adapter a persona GPU presents, beyond 0032 vendor/architecture:
+# isFallbackAdapter, subgroup sizes, and the preferred canvas format. Without a
+# GPU (a container) the adapter is SwiftShader and said so: isFallbackAdapter
+# true, subgroups of 4, rgba8unorm (the Linux answer) under an Apple vendor.
+0043-webgpu-adapter-persona.patch
+# AudioContext default sample rate and baseLatency from the persona. Both come
+# from the output device, and a container without sound hardware answers
+# 44100 Hz / 0.0107 s where a Mac answers 48000 Hz / 0.0053 s.
+0044-audio-context-persona.patch
+# Answers a Linux host gives differently from the Mac a persona describes,
+# found by auditing every page-visible surface against Chrome on an M5 Mac
+# (research/audit.py). Each reads the persona and leaves the real answer when
+# the persona does not set one.
+# Text set as CoreText sets it: unhinted, subpixel, linear advances, Mac ascent
+# and descent rounding. Hinted FreeType glyphs measured in whole pixels.
+0045-text-rendering-persona.patch
+# System colors (Highlight, SelectedItem...) and BlinkMacSystemFont as system-ui.
+0046-appearance-persona.patch
+# HEVC support and hardware decode/encode (canPlayType, MSE, MediaCapabilities
+# powerEfficient, WebCodecs) as the persona GPU has them.
+0047-media-persona.patch
+# WebAuthn platform authenticator, Bluetooth availability, keyboard layout,
+# CPU performance tier, BarcodeDetector formats.
+0048-platform-answers-persona.patch
+# WebGPU features the persona GPU has and SwiftShader lacks.
+0049-webgpu-features-persona.patch
+# Glyph bounds from outlines (canvas measureText, HarfBuzz extents) and text
+# control widths from the x glyph and the ascent, as on a Mac.
+0051-glyph-bounds-and-control-widths-persona.patch
+# Forced-fallback WebGPU answers null, WebRTC lists the persona's hardware codecs,
+# and voices arrive with voiceschanged, as Chrome on a Mac does.
+0052-gpu-codecs-voices-persona.patch
+# WebGL texture-format extensions and sample counts from the persona, and the
+# outer window size in iframes built on the outermost frame.
+0053-webgl-formats-and-outer-size-persona.patch
+# The translate service Google Chrome has, for the page-facing hrefTranslate.
+0054-translate-service-persona.patch

@@ -1,0 +1,28 @@
+# Local settings (proxy credentials)
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+.claude/worktrees/
+
+# Cursor worktrees / uploads
+.cursor/
+uploads/
+
+# The Chromium checkout and core build output (browser/build, browser/release).
+browser/src/
+browser/dist/
+browser/dist-core/

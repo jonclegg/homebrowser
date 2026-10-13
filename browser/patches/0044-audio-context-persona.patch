@@ -1,0 +1,35 @@
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_context.cc b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -453,6 +453,15 @@
+   std::optional<float> sample_rate;
+   if (context_options->hasSampleRate()) {
+     sample_rate = context_options->sampleRate();
++  } else if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    // The default rate is the output device's, so it belongs to the persona:
++    // a container without sound hardware answers 44100 where a Mac answers
++    // 48000. Asking for the persona's rate is what a page passing sampleRate
++    // does; Chromium resamples to the real device.
++    if (std::optional<double> persona_rate =
++            config->GetDouble("audio.sampleRate")) {
++      sample_rate = static_cast<float>(*persona_rate);
++    }
+   }
+ 
+   std::optional<uint32_t> render_quantum_frames = 128;
+@@ -678,6 +687,15 @@
+                                        .GetFramesPerBuffer()),
+                static_cast<size_t>(renderQuantumSize()));
+   base_latency_ = base_latency_frames / static_cast<double>(sampleRate());
++  // The hardware buffer size is the output device's too (measured: 0.0107 s in
++  // a container against a Mac's 0.0053 s).
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<double> latency = config->GetDouble("audio.baseLatency")) {
++      if (*latency > 0) {
++        base_latency_ = *latency;
++      }
++    }
++  }
+   SendLogMessage(__func__,
+                  Format("=> (base latency={:.3f} seconds))", base_latency_));
+ 

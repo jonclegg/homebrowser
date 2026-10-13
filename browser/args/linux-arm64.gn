@@ -1,0 +1,45 @@
+# GN args — Linux arm64 release build, cross-compiled on an x64 Linux host.
+# Everything but target_cpu matches linux-x64.gn; read that file for the why.
+#
+# Cross-compiled because that is the direction Chromium supports: the arm64
+# sysroot is a gclient hook, fetched when .gclient lists target_cpu "arm64"
+# (fetch.sh writes that on a Linux host).
+
+target_os = "linux"
+target_cpu = "arm64"
+
+is_official_build = true
+is_debug = false
+symbol_level = 0
+blink_symbol_level = 0
+dcheck_always_on = false
+
+# --- CRITICAL for anti-detect ------------------------------------------------
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# --- de-Google ---------------------------------------------------------------
+is_chrome_branded = false
+use_official_google_api_keys = false
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+enable_reporting = false
+enable_remoting = false
+# safe_browsing_mode = 0   # DO NOT SET -- see macos-arm64.gn.
+enable_hangout_services_extension = false
+
+enable_widevine = true
+
+enable_print_preview = true
+
+use_lld = true
+# There is one Linux profile, chrome/build/linux.pgo.txt, and pgo/BUILD.gn picks
+# it for every Linux CPU; pgo.gni defaults an official Linux build of any CPU to
+# phase 2. So this is upstream's own arm64 configuration, not a guess.
+chrome_pgo_phase = 2
+
+# --- match real Chrome's feature set ----------------------------------------
+disable_fieldtrial_testing_config = true
+
+use_siso = false

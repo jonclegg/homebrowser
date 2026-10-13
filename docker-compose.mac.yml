@@ -1,0 +1,12 @@
+# Mac hosts (start.sh adds this file through COMPOSE_FILE in .env): present the
+# browser as a Mac. On an Apple Silicon host the macOS persona clears some bot
+# checks that the Windows persona fails. It gets a 1440x900 Retina
+# screen (2880x1800 at DPR 2) and the Mac's own system fonts, read-only.
+services:
+  homebrowser:
+    environment:
+      HOMEBROWSER_PERSONA: macos
+      HOMEBROWSER_DISPLAY_SIZE: 2880x1800
+    volumes:
+      - /System/Library/Fonts:/usr/local/share/fonts/host-system:ro
+      - /Library/Fonts:/usr/local/share/fonts/host-library:ro

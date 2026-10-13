@@ -1,0 +1,159 @@
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -1704,7 +1704,19 @@
+   if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
+     if (std::optional<int> delta = config->GetInt("screen.chromeHeightDelta")) {
+       if (*delta >= 0) {
+-        return innerHeight() + *delta;
++        // In an iframe, the outer size is the window's, built on the outermost
++        // main frame's viewport: built on the iframe's own, a 300px challenge
++        // frame reports a 300px-wide window. An out-of-process iframe learns
++        // that size from its embedder; until then, the real window's is used.
++        if (frame->IsOutermostMainFrame()) {
++          return innerHeight() + *delta;
++        }
++        const gfx::Size outermost = frame->GetOutermostMainFrameSize();
++        if (!outermost.IsEmpty()) {
++          return AdjustForAbsoluteZoom::AdjustInt(outermost.height(),
++                                                  frame->LayoutZoomFactor()) +
++                 *delta;
++        }
+       }
+     }
+   }
+@@ -1748,7 +1760,19 @@
+   if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
+     if (std::optional<int> delta = config->GetInt("screen.chromeWidthDelta")) {
+       if (*delta >= 0) {
+-        return innerWidth() + *delta;
++        // In an iframe, the outer size is the window's, built on the outermost
++        // main frame's viewport: built on the iframe's own, a 300px challenge
++        // frame reports a 300px-wide window. An out-of-process iframe learns
++        // that size from its embedder; until then, the real window's is used.
++        if (frame->IsOutermostMainFrame()) {
++          return innerWidth() + *delta;
++        }
++        const gfx::Size outermost = frame->GetOutermostMainFrameSize();
++        if (!outermost.IsEmpty()) {
++          return AdjustForAbsoluteZoom::AdjustInt(outermost.width(),
++                                                  frame->LayoutZoomFactor()) +
++                 *delta;
++        }
+       }
+     }
+   }
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -3848,6 +3848,31 @@
+   return false;
+ }
+ 
++// Fury: texture-format extensions the persona's GPU has and SwiftShader lacks.
++// Chrome on a Mac offers ASTC, ETC, ETC1 and PVRTC (and, in WebGL 2, shared
++// exponent rendering), and enabling them only adds format enums to what the
++// context accepts, so they can be granted without a backend. Uploading data in
++// one of those formats still fails, as there is no decoder behind it.
++bool WebGLRenderingContextBase::PersonaListsFormatExtension(
++    const ExtensionTracker* tracker) {
++  static constexpr std::string_view kFormatExtensions[] = {
++      "WEBGL_compressed_texture_astc", "WEBGL_compressed_texture_etc",
++      "WEBGL_compressed_texture_etc1", "WEBGL_compressed_texture_pvrtc",
++      "WEBGL_render_shared_exponent"};
++  const std::string name = String(tracker->ExtensionName()).Utf8();
++  if (std::ranges::find(kFormatExtensions, name) ==
++      std::end(kFormatExtensions)) {
++    return false;
++  }
++  const fury::FuryConfig* config = fury::FuryConfig::Get();
++  if (!config) {
++    return false;
++  }
++  std::optional<std::vector<std::string>> persona = config->GetStringList(
++      IsWebGL2() ? "gpu.webgl2Extensions" : "gpu.webglExtensions");
++  return persona && std::ranges::find(*persona, name) != persona->end();
++}
++
+ bool WebGLRenderingContextBase::ExtensionSupportedAndAllowed(
+     const ExtensionTracker* tracker) {
+   if (tracker->Draft() &&
+@@ -3856,8 +3881,9 @@
+   if (tracker->Developer() &&
+       !RuntimeEnabledFeatures::WebGLDeveloperExtensionsEnabled())
+     return false;
+-  if (!tracker->Supported(this))
++  if (!tracker->Supported(this) && !PersonaListsFormatExtension(tracker)) {
+     return false;
++  }
+   if (disabled_extensions_.Contains(String(tracker->ExtensionName())))
+     return false;
+   return true;
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -1081,6 +1081,7 @@
+   }
+ 
+   bool ExtensionSupportedAndAllowed(const ExtensionTracker*);
++  bool PersonaListsFormatExtension(const ExtensionTracker*);
+   WebGLExtension* EnableExtensionIfSupported(
+       const String& name,
+       ExecutionContext* execution_context);
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_compressed_texture_astc.cc b/third_party/blink/renderer/modules/webgl/webgl_compressed_texture_astc.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_compressed_texture_astc.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_compressed_texture_astc.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/webgl/webgl_compressed_texture_astc.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+ 
+ namespace blink {
+@@ -34,6 +36,12 @@
+ 
+   supports_hdr = context->ExtensionsUtil()->EnsureExtensionEnabled(
+       "GL_KHR_texture_compression_astc_hdr");
++  // Fury: the persona's ASTC profiles; Apple GPUs decode HDR as well as LDR.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<bool> hdr = config->GetBool("gpu.astcHdr")) {
++      supports_hdr = *hdr;
++    }
++  }
+ 
+   const int kAlphaFormatGap =
+       GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR - GL_COMPRESSED_RGBA_ASTC_4x4_KHR;
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -11,6 +11,7 @@
+ #include "base/feature_list.h"
+ #include "base/numerics/checked_math.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/strings/string_number_conversions.h"
+ #include "gpu/command_buffer/client/gles2_interface.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/platform/web_graphics_context_3d_provider.h"
+@@ -658,6 +659,20 @@
+       if (length <= 0) {
+         return WebGLAny(script_state, DOMInt32Array::Create(0));
+       }
++      // Fury: the persona GPU's multisample counts for a renderable format.
++      // SwiftShader offers only 4, and Chrome on an Apple GPU offers 8, 4, 2.
++      if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++        if (std::optional<std::vector<std::string>> counts =
++                config->GetStringList("gpu.renderbufferSampleCounts")) {
++          std::vector<GLint> persona;
++          for (const std::string& count : *counts) {
++            int value = 0;
++            CHECK(base::StringToInt(count, &value));
++            persona.push_back(value);
++          }
++          return WebGLAny(script_state, DOMInt32Array::Create(persona));
++        }
++      }
+       auto values = base::HeapArray<GLint>::WithSize(length);
+       ContextGL()->GetInternalformativ(target, internalformat, GL_SAMPLES,
+                                        length, values.data());

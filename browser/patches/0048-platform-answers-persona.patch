@@ -1,0 +1,195 @@
+diff --git a/third_party/blink/renderer/modules/credentialmanagement/public_key_credential.cc b/third_party/blink/renderer/modules/credentialmanagement/public_key_credential.cc
+--- a/third_party/blink/renderer/modules/credentialmanagement/public_key_credential.cc
++++ b/third_party/blink/renderer/modules/credentialmanagement/public_key_credential.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "third_party/blink/renderer/modules/credentialmanagement/public_key_credential.h"
+ 
++#include "base/strings/string_split.h"
++#include "components/fury/fury_config.h"
++
+ #include <utility>
+ #include <variant>
+ 
+@@ -92,6 +95,30 @@
+       RuntimeEnabledFeatures::WebAuthenticationCrossDeviceFallbackUrlEnabled(
+           resolver->GetExecutionContext()));
+ 
++  // The platform authenticator is the host's: Touch ID and iCloud Keychain on
++  // a Mac, none in a container. A persona lists "name=true|false" overrides.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<std::vector<std::string>> overrides =
++            config->GetStringList("webauthn.clientCapabilities")) {
++      for (const std::string& entry : *overrides) {
++        std::vector<std::string> parts = base::SplitString(
++            entry, "=", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++        if (parts.size() != 2) {
++          continue;
++        }
++        String name = String::FromUtf8(parts[0]);
++        bool value = parts[1] == "true";
++        auto it = std::find_if(results.begin(), results.end(),
++                               [&](const auto& r) { return r.first == name; });
++        if (it != results.end()) {
++          it->second = value;
++        } else {
++          results.emplace_back(name, value);
++        }
++      }
++    }
++  }
++
+   // Results should be sorted lexicographically based on the keys.
+   std::sort(
+       results.begin(), results.end(),
+@@ -189,6 +216,14 @@
+       WebFeature::
+           kCredentialManagerIsUserVerifyingPlatformAuthenticatorAvailable);
+ 
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<bool> available =
++            config->GetBool("webauthn.platformAuthenticator")) {
++      resolver->Resolve(*available);
++      return promise;
++    }
++  }
++
+   auto* authenticator =
+       CredentialManagerProxy::From(script_state)->Authenticator();
+   authenticator->IsUserVerifyingPlatformAuthenticatorAvailable(
+diff --git a/third_party/blink/renderer/modules/bluetooth/bluetooth.cc b/third_party/blink/renderer/modules/bluetooth/bluetooth.cc
+--- a/third_party/blink/renderer/modules/bluetooth/bluetooth.cc
++++ b/third_party/blink/renderer/modules/bluetooth/bluetooth.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/bluetooth/bluetooth.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include <utility>
+ 
+ #include "build/build_config.h"
+@@ -330,6 +332,13 @@
+     return ToResolvedPromise<IDLBoolean>(script_state, false);
+   }
+ 
++  // Every Mac has a Bluetooth radio; the container has no adapter.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<bool> available = config->GetBool("bluetooth.available")) {
++      return ToResolvedPromise<IDLBoolean>(script_state, *available);
++    }
++  }
++
+   CHECK(window->IsSecureContext());
+   EnsureServiceConnection(window);
+ 
+diff --git a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
+--- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
++++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "third_party/blink/renderer/modules/keyboard/keyboard_layout.h"
+ 
++#include "base/strings/string_split.h"
++#include "components/fury/fury_config.h"
++
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/task_type.h"
+@@ -93,6 +96,21 @@
+ 
+   switch (result->status) {
+     case mojom::blink::GetKeyboardLayoutMapStatus::kSuccess:
++      // The host's keyboard layout: X11's US layout puts "<" on the ISO key
++      // that a Mac's US layout labels "\u00a7". A persona lists
++      // "code=character" overrides.
++      if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++        if (std::optional<std::vector<std::string>> overrides =
++                config->GetStringList("keyboard.layoutOverrides")) {
++          for (const std::string& entry : *overrides) {
++            size_t split = entry.find('=');
++            if (split != std::string::npos && split > 0) {
++              result->layout_map.Set(String::FromUtf8(entry.substr(0, split)),
++                                     String::FromUtf8(entry.substr(split + 1)));
++            }
++          }
++        }
++      }
+       layout_map_property_->Resolve(
+           MakeGarbageCollected<KeyboardLayoutMap>(result->layout_map));
+       break;
+diff --git a/third_party/blink/renderer/core/frame/navigator_cpu_performance.cc b/third_party/blink/renderer/core/frame/navigator_cpu_performance.cc
+--- a/third_party/blink/renderer/core/frame/navigator_cpu_performance.cc
++++ b/third_party/blink/renderer/core/frame/navigator_cpu_performance.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_cpu_performance.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include "third_party/blink/public/mojom/cpu_performance.mojom-blink.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+@@ -13,6 +15,12 @@
+ 
+ // static
+ uint16_t NavigatorCPUPerformance::cpuPerformance(Navigator& navigator) {
++  // The tier comes from the host's CPU; the persona's machine has its own.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<int> tier = config->GetInt("navigator.cpuPerformance")) {
++      return static_cast<uint16_t>(*tier);
++    }
++  }
+   mojom::blink::PerformanceTier tier =
+       Platform::Current()->GetCpuPerformanceTier();
+   probe::ApplyCPUPerformanceOverride(
+diff --git a/third_party/blink/renderer/modules/shapedetection/barcode_detector.cc b/third_party/blink/renderer/modules/shapedetection/barcode_detector.cc
+--- a/third_party/blink/renderer/modules/shapedetection/barcode_detector.cc
++++ b/third_party/blink/renderer/modules/shapedetection/barcode_detector.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/shapedetection/barcode_detector.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include <utility>
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+@@ -104,6 +106,22 @@
+ // static
+ ScriptPromise<IDLSequence<V8BarcodeFormat>>
+ BarcodeDetector::getSupportedFormats(ScriptState* script_state) {
++  // macOS supplies the detector, Linux has none: the persona's formats, as
++  // Chrome on a Mac lists them.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<std::vector<std::string>> formats =
++            config->GetStringList("barcodeDetector.formats")) {
++      Vector<V8BarcodeFormat> result;
++      for (const std::string& name : *formats) {
++        if (std::optional<V8BarcodeFormat> format =
++                V8BarcodeFormat::Create(String::FromUtf8(name))) {
++          result.push_back(*format);
++        }
++      }
++      return ToResolvedPromise<IDLSequence<V8BarcodeFormat>>(script_state,
++                                                            result);
++    }
++  }
+   ExecutionContext* context = ExecutionContext::From(script_state);
+   return BarcodeDetectorStatics::From(context)->EnumerateSupportedFormats(
+       script_state);
+@@ -162,6 +180,14 @@
+     resolver->Resolve(HeapVector<Member<DetectedBarcode>>());
+     return promise;
+   }
++
++  // With no detector to run, find nothing, as a Mac does in an image without
++  // a barcode, rather than reject with "not implemented".
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get();
++      config && config->GetStringList("barcodeDetector.formats")) {
++    resolver->Resolve(HeapVector<Member<DetectedBarcode>>());
++    return promise;
++  }
+ 
+   if (!service_.is_bound()) {
+     resolver->RejectWithDOMException(DOMExceptionCode::kNotSupportedError,

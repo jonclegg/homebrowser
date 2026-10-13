@@ -1,0 +1,27 @@
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -77,6 +77,23 @@
+       }
+       }
+   }
++  // 0032 only narrows. A persona can also report its GPU's whole list
++  // ("gpu.webgpu.reportPersonaFeatures"): SwiftShader lacks shader-f16,
++  // dual-source-blending and the texture tiers every Apple GPU has, and the
++  // missing names gave away a software adapter under an Apple vendor string.
++  // requestDevice() asking for one still fails, as on any adapter without it.
++  if (allowed_features) {
++    if (const fury::FuryConfig* config = fury::FuryConfig::Get();
++        config && config->GetBool("gpu.webgpu.reportPersonaFeatures") == true) {
++      for (const std::string& name : *allowed_features) {
++        std::optional<V8GPUFeatureName> feature =
++            V8GPUFeatureName::Create(String::FromUtf8(name));
++        if (feature && !features->Has(feature->AsEnum())) {
++          features->AddFeatureName(*feature);
++        }
++      }
++    }
++  }
+   return features;
+ }
+ 

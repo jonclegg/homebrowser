@@ -1,0 +1,48 @@
+# GN args — Linux x64 release build.
+# See docs/03-chromium-fork.md for why each block is here; the blocks shared
+# with windows-x64.gn carry the same reasons and are not repeated in full.
+#
+# Built on an x64 Linux host only (build.sh refuses anything else). The sysroot
+# Chromium pins in build/linux/ is used, not the host's libraries, so the binary
+# runs on any glibc the sysroot supports rather than only on the build machine.
+
+target_os = "linux"
+target_cpu = "x64"
+
+is_official_build = true
+is_debug = false
+symbol_level = 0
+blink_symbol_level = 0
+dcheck_always_on = false
+
+# --- CRITICAL for anti-detect ------------------------------------------------
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# --- de-Google ---------------------------------------------------------------
+is_chrome_branded = false
+use_official_google_api_keys = false
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+enable_reporting = false
+enable_remoting = false
+# safe_browsing_mode = 0   # DO NOT SET -- see macos-arm64.gn.
+enable_hangout_services_extension = false
+
+# On, for the reason windows-x64.gn gives: a build with it off refuses
+# com.widevine.alpha where real Chrome accepts it. NOT measured on Linux yet.
+enable_widevine = true
+
+enable_print_preview = true
+
+use_lld = true
+# 2, not 1 -- see windows-x64.gn. The Linux x64 profile arrives with the
+# checkout like the others (checkout_pgo_profiles in fetch.sh's .gclient).
+chrome_pgo_phase = 2
+
+# --- match real Chrome's feature set ----------------------------------------
+disable_fieldtrial_testing_config = true
+
+# Keep ninja -- see windows-x64.gn.
+use_siso = false

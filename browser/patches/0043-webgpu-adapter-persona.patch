@@ -1,0 +1,84 @@
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -154,6 +154,8 @@
+ 
+ GPUAdapterInfo* GPUAdapter::CreateAdapterInfoForAdapter() {
+   bool is_fallback_adapter = adapter_type_ == wgpu::AdapterType::CPU;
++  uint32_t subgroup_min_size = subgroup_min_size_;
++  uint32_t subgroup_max_size = subgroup_max_size_;
+ 
+   // adapter.info has to describe the same physical card as the WebGL renderer
+   // string patched in 0031. A build that claims an NVIDIA card in WebGL while
+@@ -176,6 +178,21 @@
+     // they are applied unconditionally rather than guarded on non-emptiness.
+     apply("gpu.webgpu.device", device);
+     apply("gpu.webgpu.description", description);
++    // A persona describes a hardware GPU. Without a GPU (a container) the
++    // adapter is SwiftShader, a CPU adapter, and info said so in so many words:
++    // isFallbackAdapter true and SwiftShader's subgroup width of 4, under an
++    // Apple or NVIDIA vendor string. Measured: Apple M-series reports false and
++    // 32/32.
++    if (std::optional<bool> fallback =
++            config->GetBool("gpu.webgpu.isFallbackAdapter")) {
++      is_fallback_adapter = *fallback;
++    }
++    if (std::optional<int> size = config->GetInt("gpu.webgpu.subgroupMinSize")) {
++      subgroup_min_size = static_cast<uint32_t>(*size);
++    }
++    if (std::optional<int> size = config->GetInt("gpu.webgpu.subgroupMaxSize")) {
++      subgroup_max_size = static_cast<uint32_t>(*size);
++    }
+   }
+ 
+   GPUAdapterInfo* info;
+@@ -183,7 +200,7 @@
+     // If WebGPU developer features have been enabled then provide all available
+     // adapter info values.
+     info = MakeGarbageCollected<GPUAdapterInfo>(
+-        vendor, architecture, subgroup_min_size_, subgroup_max_size_,
++        vendor, architecture, subgroup_min_size, subgroup_max_size,
+         is_fallback_adapter, device, description, driver_,
+         FromDawnEnum(backend_type_), FromDawnEnum(adapter_type_),
+         d3d_shader_model_, vk_driver_version_, FromDawnEnum(power_preference_));
+@@ -197,7 +214,7 @@
+     }
+   } else {
+     info = MakeGarbageCollected<GPUAdapterInfo>(
+-        vendor, architecture, subgroup_min_size_, subgroup_max_size_,
++        vendor, architecture, subgroup_min_size, subgroup_max_size,
+         is_fallback_adapter);
+   }
+ 
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu.cc b/third_party/blink/renderer/modules/webgpu/gpu.cc
+--- a/third_party/blink/renderer/modules/webgpu/gpu.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu.cc
+@@ -7,6 +7,7 @@
+ #include <utility>
+ 
+ #include "base/feature_list.h"
++#include "components/fury/fury_config.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/notreached.h"
+ #include "base/synchronization/waitable_event.h"
+@@ -401,6 +402,20 @@
+ }
+ 
+ wgpu::TextureFormat GPU::GetPreferredCanvasFormat() {
++  // Chrome on macOS and Windows prefers BGRA, on Linux and Android RGBA: a Mac
++  // persona answering rgba8unorm is a Linux build. Both formats configure a
++  // canvas on every platform, so the persona's answer is safe to give.
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (std::optional<std::string> format =
++            config->GetString("gpu.webgpu.preferredCanvasFormat")) {
++      if (*format == "bgra8unorm") {
++        return wgpu::TextureFormat::BGRA8Unorm;
++      }
++      if (*format == "rgba8unorm") {
++        return wgpu::TextureFormat::RGBA8Unorm;
++      }
++    }
++  }
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
+   // Interop of vulkan and GL has mesa driver bugs for BGRA format
+   // See anglebug.com/40644739

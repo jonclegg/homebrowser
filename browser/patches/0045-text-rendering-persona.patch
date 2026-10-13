@@ -1,0 +1,87 @@
+diff --git a/third_party/blink/renderer/platform/fonts/web_font_render_style.cc b/third_party/blink/renderer/platform/fonts/web_font_render_style.cc
+--- a/third_party/blink/renderer/platform/fonts/web_font_render_style.cc
++++ b/third_party/blink/renderer/platform/fonts/web_font_render_style.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/public/platform/web_font_render_style.h"
+ 
+ #include "build/build_config.h"
++#include "components/fury/fury_config.h"
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
+ #include "third_party/blink/renderer/platform/fonts/font_description.h"
+ #include "third_party/blink/renderer/platform/web_test_support.h"
+@@ -91,6 +92,23 @@
+ }
+ 
+ void WebFontRenderStyle::ApplyToSkFont(SkFont* font) const {
++  // A Mac persona sets glyphs the way CoreText does: no hinting, subpixel
++  // positions and linear advances. FreeType's hinting otherwise rounds every
++  // glyph's bounds to whole pixels, and canvas measureText() reports them:
++  // 12 for an ascent a Mac reports as 11.648 (Arial, 16px, measured).
++  if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++    if (config->GetString("text.rendering") == "mac") {
++      font->setHinting(SkFontHinting::kNone);
++      font->setEmbeddedBitmaps(use_bitmaps);
++      font->setForceAutoHinting(false);
++      font->setEdging(use_anti_alias ? SkFont::Edging::kAntiAlias
++                                     : SkFont::Edging::kAlias);
++      font->setSubpixel(true);
++      font->setLinearMetrics(true);
++      return;
++    }
++  }
++
+   auto sk_hint_style = static_cast<SkFontHinting>(hint_style);
+   font->setHinting(sk_hint_style);
+   font->setEmbeddedBitmaps(use_bitmaps);
+diff --git a/third_party/blink/renderer/platform/fonts/font_metrics.cc b/third_party/blink/renderer/platform/fonts/font_metrics.cc
+--- a/third_party/blink/renderer/platform/fonts/font_metrics.cc
++++ b/third_party/blink/renderer/platform/fonts/font_metrics.cc
+@@ -29,6 +29,8 @@
+ 
+ #include "third_party/blink/renderer/platform/fonts/font_metrics.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "build/build_config.h"
+@@ -61,6 +63,14 @@
+   SkFontMetrics metrics;
+   font.getMetrics(&metrics);
+ 
++  // A Mac persona rounds ascent and descent as Chrome on a Mac does: without
++  // the Linux descent borrow, and with the Times/Helvetica/Courier ascent
++  // adjustment below. Measured at 16px: Arial 14/3 and Helvetica 14/4 on a
++  // Mac, 13/4 and 12/4 on Linux.
++  const fury::FuryConfig* fury_config = fury::FuryConfig::Get();
++  const bool mac_metrics =
++      fury_config && fury_config->GetString("text.rendering") == "mac";
++
+   if (ascent_override)
+     metrics.fAscent = -platform_data.size() * ascent_override.value();
+   if (descent_override)
+@@ -123,7 +133,7 @@
+     // the descent part of the glyph may be truncated when displayed in a
+     // 'overflow: hidden' container.  To avoid that, borrow 1 unit from the
+     // ascent when possible.
+-    if (descent < metrics.fDescent &&
++    if (!mac_metrics && descent < metrics.fDescent &&
+         platform_data.GetFontRenderStyle().use_subpixel_positioning &&
+         ascent >= 1) {
+       ++descent;
+@@ -145,6 +155,15 @@
+       family_name == font_family_names::kHelvetica ||
+       family_name == font_family_names::kCourier)
+     ascent += floorf(((ascent + descent) * 0.15f) + 0.5f);
++#else
++  if (mac_metrics) {
++    String family_name = platform_data.FontFamilyName();
++    if (family_name == font_family_names::kTimes ||
++        family_name == font_family_names::kHelvetica ||
++        family_name == font_family_names::kCourier) {
++      ascent += floorf(((ascent + descent) * 0.15f) + 0.5f);
++    }
++  }
+ #endif
+ }
+ 

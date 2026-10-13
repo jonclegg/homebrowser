@@ -1,0 +1,173 @@
+diff --git a/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc b/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc
+--- a/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc
++++ b/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include "base/containers/span.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.h"
+@@ -14,6 +16,23 @@
+ 
+ namespace blink {
+ 
++// Glyph bounds from outlines, as Chrome on a Mac takes them, rather than from
++// Skia's glyph cache, which stores whole pixels: a Mac persona's canvas
++// measureText() then reports 11.648 for an ascent Linux reports as 12 (Arial,
++// 16px, measured).
++static bool UsePathBounds() {
++#if BUILDFLAG(IS_APPLE)
++  return true;
++#else
++  static const bool mac_persona = [] {
++    const fury::FuryConfig* config = fury::FuryConfig::Get();
++    return config && config->GetString("text.rendering") == "mac";
++  }();
++  return mac_persona;
++#endif
++}
++
++
+ void SkFontGetGlyphWidthForHarfBuzz(const SkStrikeRef& strike_ref,
+                                     bool subpixel,
+                                     hb_codepoint_t codepoint,
+@@ -111,17 +130,17 @@
+   SkRect sk_bounds;
+   uint16_t glyph = codepoint;
+ 
+-#if BUILDFLAG(IS_APPLE)
+-  // TODO(drott): Remove this once we have better metrics bounds
+-  // on Mac, https://bugs.chromium.org/p/skia/issues/detail?id=5328
+-  if (const auto path = font.getPath(glyph)) {
+-    sk_bounds = path->getBounds();
++  if (UsePathBounds()) {
++    // TODO(drott): Remove this once we have better metrics bounds
++    // on Mac, https://bugs.chromium.org/p/skia/issues/detail?id=5328
++    if (const auto path = font.getPath(glyph)) {
++      sk_bounds = path->getBounds();
++    } else {
++      sk_bounds = font.getBounds(glyph, nullptr);
++    }
+   } else {
+     sk_bounds = font.getBounds(glyph, nullptr);
+   }
+-#else
+-  sk_bounds = font.getBounds(glyph, nullptr);
+-#endif
+   if (!font.isSubpixel()) {
+     // Use roundOut() rather than round() to avoid rendering glyphs
+     // outside the visual overflow rect. crbug.com/452914.
+@@ -139,7 +158,6 @@
+ // Returns path-based bounds for float precision, falling back to
+ // font.getBounds() for bitmap-only glyphs (e.g. color emoji) that have no
+ // paths.
+-#if BUILDFLAG(IS_APPLE)
+ static void GetPathBoundsForGlyph(const SkFont& font,
+                                   Glyph glyph,
+                                   SkRect* bounds) {
+@@ -155,14 +173,14 @@
+     bounds->set(ir);
+   }
+ }
+-#endif
+ 
+ void SkFontGetBoundsForGlyph(const SkFont& font, Glyph glyph, SkRect* bounds) {
+-#if BUILDFLAG(IS_APPLE)
+-  // TODO(drott): Remove this once we have better metrics bounds
+-  // on Mac, https://bugs.chromium.org/p/skia/issues/detail?id=5328
+-  GetPathBoundsForGlyph(font, glyph, bounds);
+-#else
++  if (UsePathBounds()) {
++    // TODO(drott): Remove this once we have better metrics bounds
++    // on Mac, https://bugs.chromium.org/p/skia/issues/detail?id=5328
++    GetPathBoundsForGlyph(font, glyph, bounds);
++    return;
++  }
+   *bounds = font.getBounds(glyph, nullptr);
+ 
+   if (!font.isSubpixel()) {
+@@ -170,7 +188,6 @@
+     bounds->roundOut(&ir);
+     bounds->set(ir);
+   }
+-#endif
+ }
+ 
+ void SkFontGetPreciseBoundsForGlyph(const SkFont& font,
+@@ -195,11 +212,12 @@
+ void SkFontGetBoundsForGlyphs(const SkFont& font,
+                               const Vector<Glyph, 256>& glyphs,
+                               base::span<SkRect> bounds) {
+-#if BUILDFLAG(IS_APPLE)
+-  for (unsigned i = 0; i < glyphs.size(); i++) {
+-    SkFontGetBoundsForGlyph(font, glyphs[i], &bounds[i]);
++  if (UsePathBounds()) {
++    for (unsigned i = 0; i < glyphs.size(); i++) {
++      SkFontGetBoundsForGlyph(font, glyphs[i], &bounds[i]);
++    }
++    return;
+   }
+-#else
+   static_assert(sizeof(Glyph) == 2, "Skia expects 2 bytes glyph id.");
+   font.getBounds(glyphs, {bounds.data(), glyphs.size()}, nullptr);
+ 
+@@ -210,7 +228,6 @@
+       bounds[i].set(ir);
+     }
+   }
+-#endif
+ }
+ 
+ float SkFontGetWidthForGlyph(const SkFont& font, Glyph glyph) {
+diff --git a/third_party/blink/renderer/platform/fonts/simple_font_data.cc b/third_party/blink/renderer/platform/fonts/simple_font_data.cc
+--- a/third_party/blink/renderer/platform/fonts/simple_font_data.cc
++++ b/third_party/blink/renderer/platform/fonts/simple_font_data.cc
+@@ -29,6 +29,8 @@
+ 
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include <unicode/utf16.h>
+ 
+ #include <algorithm>
+@@ -180,6 +182,13 @@
+ // In WebKit/WebCore/platform/graphics/SimpleFontData.cpp, m_spaceWidth is
+ // calculated for us, but we need to calculate m_maxCharWidth and
+ // m_avgCharWidth in order for text entry widgets to be sized correctly.
++  // A Mac persona sizes text controls as Chrome on a Mac does: average width
++  // from the 'x' glyph and maximum from the ascent, not the OS/2 average and
++  // the font's bounding box. Measured: a default <input> is 147px wide on a
++  // Mac and was 157.5 here.
++  const fury::FuryConfig* fury_config = fury::FuryConfig::Get();
++  [[maybe_unused]] const bool mac_widths =
++      fury_config && fury_config->GetString("text.rendering") == "mac";
+ #if BUILDFLAG(IS_WIN)
+   max_char_width_ = SkScalarRoundToInt(metrics.fMaxCharWidth);
+ 
+@@ -195,14 +204,18 @@
+   // https://crbug.com/420901
+   max_char_width_ = std::max(avg_char_width_, font_metrics_.FloatAscent());
+ #else
+-  // Better would be to rely on either fMaxCharWidth or fAveCharWidth.
+-  // skbug.com/3087
+-  max_char_width_ = SkScalarRoundToInt(metrics.fXMax - metrics.fXMin);
++  if (mac_widths) {
++    max_char_width_ = std::max(avg_char_width_, font_metrics_.FloatAscent());
++  } else {
++    // Better would be to rely on either fMaxCharWidth or fAveCharWidth.
++    // skbug.com/3087
++    max_char_width_ = SkScalarRoundToInt(metrics.fXMax - metrics.fXMin);
++  }
+ 
+ #endif
+ 
+ #if !BUILDFLAG(IS_APPLE)
+-  if (metrics.fAvgCharWidth) {
++  if (metrics.fAvgCharWidth && !mac_widths) {
+     avg_char_width_ = metrics.fAvgCharWidth;
+   } else {
+ #endif

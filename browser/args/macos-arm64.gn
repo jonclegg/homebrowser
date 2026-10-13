@@ -1,0 +1,111 @@
+# GN args — macOS arm64 release build.
+# See docs/03-chromium-fork.md for why each block is here.
+
+target_os = "mac"
+target_cpu = "arm64"
+
+is_official_build = true
+is_debug = false
+symbol_level = 0
+blink_symbol_level = 0
+dcheck_always_on = false
+
+# --- CRITICAL for anti-detect ------------------------------------------------
+# A Chromium built without these cannot decode H.264/AAC, while real Chrome can.
+# Two lines of JS (`canPlayType`, `MediaSource.isTypeSupported`) tell them apart,
+# which defeats every other patch in the tree.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# --- de-Google ---------------------------------------------------------------
+# Anything that phones home outside the profile's proxy is a real-IP leak.
+is_chrome_branded = false
+use_official_google_api_keys = false
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+enable_reporting = false
+enable_remoting = false
+# safe_browsing_mode = 0   # DO NOT SET. Measured on M150: leaves the GN graph
+#                          # unresolvable (chrome/browser/feedback and others
+#                          # depend on //components/safe_browsing regardless).
+#                          # Needs source patches — see patch 0901.
+enable_hangout_services_extension = false
+
+# --- Widevine ----------------------------------------------------------------
+# The CDM is a proprietary blob that cannot be redistributed without a licence
+# from Google. See docs/10.
+#
+# The old note here said patch 0061 would fake requestMediaKeySystemAccess so
+# that its absence was not detectable. 0061 was retired on 02.08.2026 — measured
+# against real Chrome 150, 176 codec fields agree exactly, so there was nothing
+# for it to do — and faking DRM was never in its scope anyway. The note outlived
+# the plan.
+#
+# What is true: a build with enable_widevine = false REFUSES
+# com.widevine.alpha, real Chrome accepts it, and the release gate has a check
+# for exactly that which such a build fails. Two lines of JS tell them apart.
+#
+# So this is not "the shippable configuration", it is the configuration for a
+# binary that may be handed to someone else. The support code is open and only
+# the blob is not, which is why the low-memory args build WITH Widevine and
+# browser/build/link-widevine.sh stages the blob out of the Chrome already
+# installed on that machine — legal, because it is already there, and not
+# redistributable, because it never leaves.
+#
+# The staging step now exists: agent/src/widevine.rs copies the CDM out of the
+# Chrome already installed on the user's machine when the agent starts, into the
+# same layout bundle_widevine_cdm would have produced. Nothing is redistributed
+# — the blob was already licensed onto that machine — and a build made from
+# these args therefore answers requestMediaKeySystemAccess the way real Chrome
+# does, on any machine that has Chrome.
+#
+# What is still true: a machine with NO Chrome installed gets a browser with no
+# CDM, which fails the gate's Widevine check. That is a detectable browser and a
+# working one, and it is the right trade — the alternative is refusing to start.
+# Turned on 10.09.2026, together with the Windows args, and for a reason
+# measured there rather than assumed here: with the flag off and the CDM staged
+# beside the core by agent/src/widevine.rs, Windows still answered
+# requestMediaKeySystemAccess("com.widevine.alpha") with NotSupportedError while
+# real Chrome on the same machine answered available. Turning it on was the fix,
+# and it cost 346 build steps rather than a full rebuild.
+#
+# macOS has NOT been measured either way. It is set here so the first 153 build
+# on a Mac is made with it rather than repeated because of it; if the answer
+# turns out to differ on this platform, that is worth writing down here.
+#
+# What it does not change: the CDM is still not in this repository, not in a
+# release and not in an installer. bundle_widevine_cdm stays off and the blob
+# arrives at runtime from the user's own Chrome. docs/10 has the licence.
+enable_widevine = true
+
+# --- size --------------------------------------------------------------------
+# enable_nacl was removed upstream by M150; setting it only produces a warning
+enable_print_preview = true
+
+# --- toolchain ---------------------------------------------------------------
+use_lld = true
+# 2, not 1 -- see the block in windows-x64.gn. 1 is the INSTRUMENTED build,
+# which is a third slower and writes profile data when it exits; it was here by
+# mistake and produced a 701 MB chrome.dll on Windows before anyone noticed.
+# The profiles it reads come with the checkout (checkout_pgo_profiles).
+chrome_pgo_phase = 2
+
+# --- match real Chrome's feature set ----------------------------------------
+# An unbranded build applies testing/variations/fieldtrial_testing_config.json
+# by default (variations_field_trial_creator.cc:142), which force-enables
+# features that real stable Chrome ships disabled. ReduceAcceptLanguage and
+# ReduceAcceptLanguageHTTP are both in there for mac and windows, and they trim
+# Accept-Language to one language while navigator.languages still reports the
+# full list — a browser contradicting itself, from a build setting rather than
+# from anything in the patches.
+#
+# Also passed as --disable-field-trial-config at launch, so binaries built
+# before this line still behave.
+disable_fieldtrial_testing_config = true
+
+# Keep ninja. autoninja in this depot_tools prefers Siso and then refuses an
+# output directory ninja created — "run gn clean", which throws away every
+# object file. Saying so here is cheaper than losing a build to a default that
+# changed upstream.
+use_siso = false

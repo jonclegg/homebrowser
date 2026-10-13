@@ -1,0 +1,8 @@
+.git
+.env
+browser/src
+browser/dist
+browser/dist-core
+docs
+tests
+**/__pycache__

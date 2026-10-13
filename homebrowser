@@ -1,0 +1,155 @@
+#!/bin/bash
+set -euo pipefail
+source="${BASH_SOURCE[0]}"
+while [ -L "$source" ]; do
+  dir="$(cd "$(dirname "$source")" && pwd)"
+  source="$(readlink "$source")"
+  case "$source" in
+    /*) ;;
+    *) source="$dir/$source" ;;
+  esac
+done
+source "$(cd "$(dirname "$source")" && pwd)/lib.sh"
+
+usage() {
+  cat >&2 <<EOF
+Usage: homebrowser <command> [--json]
+
+  start          Start the stealth browser. --force-onboard shows the first-run
+                 next steps even when the OpenRouter key is set.
+  stop           Stop it (the profile is kept).
+  status         Is it ready, and the viewer, CDP, and share URLs.
+  share          HTTPS link to the console: every session and the live
+                 browser, behind the console password. No confirmation.
+  unshare        Stop that link, and sign out the devices that used it.
+  chat "<msg>"   Talk to Homebrowser; it works the browser with DeepSeek and
+                 replies. --session <id> continues the same tab and conversation.
+  run <id>       A run's steps, reply, and saved files.
+  cancel <id>    Stop a run.
+  notes [site]   What Homebrowser has learned about each site.
+  key            Open a page to paste the OpenRouter key into (never into chat),
+                 then wait until it is saved, rejected, or the link expires.
+                 --in-browser opens it in Homebrowser's browser, for the viewer.
+                 --json prints the link and returns at once.
+  password       One-time link to set or reset the console password, then
+                 wait until it is saved. --share makes the link work from
+                 anywhere (through the share); --json returns at once.
+  smoke [sites]  Reach a few sites from Bing and open a report with
+                 screenshots (default: <data>/smoke-sites.txt).
+
+chat, run, cancel, notes, key, password, smoke, share and unshare run inside the container, so from any
+shell (PowerShell too) they also work as: docker exec homebrowser homebrowser <command>
+EOF
+  exit 2
+}
+
+status() {
+  docker_running=false
+  docker info >/dev/null 2>&1 && docker_running=true
+  container="$(health)"
+  browser=""
+  [ "$container" = healthy ] && browser="$(curl -fsS --max-time 10 "${CDP_URL}/json/version" | sed -n 's/.*"Browser": *"\([^"]*\)".*/\1/p')"
+  share_url="$(active_share_url)"
+  openrouter_key=false
+  [ -s "${DATA_DIR}/openrouter.key" ] && openrouter_key=true
+  console_password=false
+  [ -s "${DATA_DIR}/console-password" ] && console_password=true
+  if [ "${1:-}" = --json ]; then
+    printf '{"docker_running":%s,"container":"%s","ready":%s,"browser":%s,"cdp_url":"%s","viewer_url":"%s","api_url":"%s","openrouter_key":%s,"console_password":%s,"share_url":%s}\n' \
+      "$docker_running" "$container" "$([ "$container" = healthy ] && echo true || echo false)" \
+      "$([ -n "$browser" ] && echo "\"$browser\"" || echo null)" "$CDP_URL" "$VIEWER_URL" "$API_URL" "$openrouter_key" \
+      "$console_password" "$([ -n "$share_url" ] && echo "\"$share_url\"" || echo null)"
+    return 0
+  else
+    printf 'Docker running:    %s\nContainer:         %s\nBrowser:           %s\nViewer:            %s\nShare:             %s\nCDP:               %s\nChat API:          %s\nOpenRouter key:    %s\nConsole password:  %s\n' \
+      "$docker_running" "$container" "${browser:--}" "$VIEWER_URL" "${share_url:--}" "$CDP_URL" "$API_URL" \
+      "$([ "$openrouter_key" = true ] && echo set || echo "missing (run: homebrowser key)")" \
+      "$([ "$console_password" = true ] && echo set || echo "missing (run: homebrowser password)")"
+  fi
+  [ "$container" = healthy ]
+}
+
+require_running() {
+  if [ "$(health)" != healthy ]; then
+    echo "Homebrowser is not running. Start it with: homebrowser start" >&2
+    exit 1
+  fi
+}
+
+open_on_host() {
+  case "$(uname -s)" in
+    Darwin) open "$1" ;;
+    *) command -v xdg-open >/dev/null 2>&1 && xdg-open "$1" >/dev/null 2>&1 ;;
+  esac
+}
+
+command="${1:-}"
+[ $# -gt 0 ] && shift
+case "$command" in
+  start) exec bash "${HOMEBROWSER_ROOT}/start.sh" "$@" ;;
+  stop) exec bash "${HOMEBROWSER_ROOT}/stop.sh" ;;
+  status) status "$@" ;;
+  share)
+    if [ "$(health)" != healthy ]; then
+      [ "${1:-}" = --json ] && echo '{"event":"starting","detail":"Starting the browser."}'
+      bash "${HOMEBROWSER_ROOT}/start.sh" >&2
+    fi
+    # The tunnel runs in its own container, so it keeps its address when Homebrowser
+    # restarts or updates; starting it again while it runs changes nothing.
+    docker compose --profile share up -d share >/dev/null 2>&1
+    exec docker exec homebrowser homebrowser share "$@"
+    ;;
+  unshare)
+    if [ "$(health)" = healthy ]; then
+      docker exec homebrowser homebrowser unshare "$@"
+    else
+      [ "${1:-}" = --json ] && echo '{"event":"share_stopped","stopped":false}' || echo "Nothing is being shared."
+    fi
+    docker compose --profile share rm -sf share >/dev/null 2>&1
+    ;;
+  key)
+    require_running
+    if [ "${1:-}" = --json ]; then
+      exec docker exec homebrowser homebrowser key "$@"
+    fi
+    # Open the page on this computer, then report what happens to it: saved,
+    # rejected by OpenRouter (the page stays open for another try), or expired.
+    docker exec homebrowser homebrowser key --wait "$@" | while IFS= read -r line; do
+      printf '%s\n' "$line"
+      case "$line" in
+        "Paste the OpenRouter key into: "*) open_on_host "${line#Paste the OpenRouter key into: }" || true ;;
+      esac
+    done
+    exit "${PIPESTATUS[0]}"
+    ;;
+  password)
+    require_running
+    case " $* " in
+      *" --json "*|*" --share "*) exec docker exec homebrowser homebrowser password "$@" ;;
+    esac
+    # A local link: open it on this computer, then report when it is saved.
+    docker exec homebrowser homebrowser password "$@" | while IFS= read -r line; do
+      printf '%s\n' "$line"
+      case "$line" in
+        "Set the console password at: "*) open_on_host "${line#Set the console password at: }" || true ;;
+      esac
+    done
+    exit "${PIPESTATUS[0]}"
+    ;;
+  smoke)
+    require_running
+    if [ "${1:-}" = --json ]; then
+      exec docker exec homebrowser homebrowser smoke "$@"
+    fi
+    result=0
+    docker exec homebrowser homebrowser smoke "$@" || result=$?
+    report="$(ls -td "${DATA_DIR}"/smoke/smoke_* 2>/dev/null | head -n 1)/report.html"
+    [ -f "$report" ] && { open_on_host "$report" || true; }
+    exit "$result"
+    ;;
+  chat|run|cancel|notes)
+    require_running
+    exec docker exec homebrowser homebrowser "$command" "$@"
+    ;;
+  *) usage ;;
+esac

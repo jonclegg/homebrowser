@@ -1,0 +1,83 @@
+name: homebrowser
+
+services:
+  # Built on this computer by `homebrowser start`; nothing is published.
+  homebrowser:
+    build:
+      context: .
+      dockerfile: image/Dockerfile
+      # FURY_CORE_URL, when set, builds against cores that are not released yet,
+      # e.g. a local `python3 -m http.server` over browser/dist.
+      args:
+        - FURY_CORE_URL
+      # The core release is private: GITHUB_TOKEN (start.sh takes it from
+      # `gh auth token`) must be able to read jonclegg/homebrowser.
+      secrets:
+        - github_token
+    image: ${HOMEBROWSER_IMAGE:-homebrowser:local}
+    container_name: homebrowser
+    hostname: homebrowser
+    restart: unless-stopped
+    # An init as PID 1 to reap orphans. Chrome's crashpad handlers outlive their
+    # browsers, and nothing else in the container waits on them: measured 455
+    # zombies after a day of runs.
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      HOMEBROWSER_HOST_DATA_DIR: ${HOMEBROWSER_DATA_DIR:-${HOME}/.homebrowser/data}
+      HOMEBROWSER_API_HOST_PORT: ${HOMEBROWSER_API_PORT:-8423}
+      HOMEBROWSER_VIEWER_HOST_PORT: ${HOMEBROWSER_VIEWER_PORT:-6080}
+    ports:
+      # Localhost only. Anyone who can reach these ports controls the browser.
+      - "127.0.0.1:${HOMEBROWSER_CDP_PORT:-9222}:9222"
+      - "127.0.0.1:${HOMEBROWSER_VIEWER_PORT:-6080}:6080"
+      - "127.0.0.1:${HOMEBROWSER_API_PORT:-8423}:8423"
+    # Chromium crashes tabs with Docker's default 64 MB /dev/shm.
+    shm_size: 2gb
+    volumes:
+      - profile:/profile
+      # The GeoIP database, downloaded on first start.
+      - cache:/root/.homebrowser
+      # Notes, run logs, saved photos, the API token. A host folder, so callers
+      # can open the files directly.
+      - ${HOMEBROWSER_DATA_DIR:-${HOME}/.homebrowser/data}:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:9222/json/version && curl -fsS -o /dev/null http://localhost:8423/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # The first start downloads the GeoIP database.
+      start_period: 300s
+
+  # The console's share link (`homebrowser share`): a Cloudflare quick tunnel in a
+  # container of its own, so restarting or updating Homebrowser keeps its address and
+  # every device signed in through it. `homebrowser unshare` stops it.
+  share:
+    image: ${HOMEBROWSER_IMAGE:-homebrowser:local}
+    profiles: ["share"]
+    entrypoint: ["cloudflared"]
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:20241", "--url", "http://homebrowser:8423"]
+    restart: unless-stopped
+
+  hello:
+    image: ${HOMEBROWSER_IMAGE:-homebrowser:local}
+    profiles: ["examples"]
+    depends_on:
+      homebrowser:
+        condition: service_healthy
+    environment:
+      CDP_URL: http://homebrowser:9222
+    volumes:
+      - ./examples:/examples:ro
+    entrypoint: ["python", "-u", "/examples/hello.py"]
+
+volumes:
+  profile:
+  cache:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN

@@ -1,0 +1,73 @@
+diff --git a/third_party/blink/renderer/core/layout/layout_theme.cc b/third_party/blink/renderer/core/layout/layout_theme.cc
+--- a/third_party/blink/renderer/core/layout/layout_theme.cc
++++ b/third_party/blink/renderer/core/layout/layout_theme.cc
+@@ -21,6 +21,11 @@
+ 
+ #include "third_party/blink/renderer/core/layout/layout_theme.h"
+ 
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "components/fury/fury_config.h"
++
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+ #include "third_party/blink/public/resources/grit/blink_resources.h"
+@@ -615,6 +620,25 @@
+                                mojom::blink::ColorScheme color_scheme,
+                                const ui::ColorProvider* color_provider,
+                                bool can_expose_accent_color) const {
++  // System colors are the host's: Linux selects in blue on white where a Mac
++  // highlights in its light accent with black text. A persona gives them as
++  // "systemColors.<keyword>": "r,g,b,a" for the light scheme.
++  if (color_scheme == mojom::blink::ColorScheme::kLight) {
++    if (const fury::FuryConfig* config = fury::FuryConfig::Get()) {
++      if (std::optional<std::string> value = config->GetString(base::StrCat(
++              {"systemColors.", GetCSSValueName(css_value_id)}))) {
++        std::vector<std::string> parts = base::SplitString(
++            *value, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++        int rgba[4] = {0, 0, 0, 255};
++        if (parts.size() == 4 && base::StringToInt(parts[0], &rgba[0]) &&
++            base::StringToInt(parts[1], &rgba[1]) &&
++            base::StringToInt(parts[2], &rgba[2]) &&
++            base::StringToInt(parts[3], &rgba[3])) {
++          return Color::FromRGBA(rgba[0], rgba[1], rgba[2], rgba[3]);
++        }
++      }
++    }
++  }
+   if (color_provider && !WebTestSupport::IsRunningWebTest()) {
+     return SystemColorFromColorProvider(
+         css_value_id, color_scheme, color_provider, can_expose_accent_color);
+diff --git a/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc b/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc
+--- a/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc
++++ b/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc
+@@ -25,6 +25,8 @@
+  */
+ #include "third_party/blink/renderer/core/css/resolver/style_builder_converter.h"
+ 
++#include "components/fury/fury_config.h"
++
+ #include <algorithm>
+ #include <memory>
+ #include <optional>
+@@ -538,6 +540,19 @@
+                              : FontFamily::Type::kFamilyName;
+     has_value = true;
+ 
++#if !BUILDFLAG(IS_MAC)
++    // Chrome on a Mac reads the family name BlinkMacSystemFont as system-ui
++    // (the Mac branch below); a page reading the computed family back sees
++    // "system-ui" there and "BlinkMacSystemFont" anywhere else.
++    if (IsA<CSSFontFamilyValue>(*family) &&
++        family_name == font_family_names::kBlinkMacSystemFont) {
++      if (const fury::FuryConfig* config = fury::FuryConfig::Get();
++          config && config->GetString("text.rendering") == "mac") {
++        family_name = font_family_names::kSystemUi;
++      }
++    }
++#endif
++
+ #if BUILDFLAG(IS_MAC)
+     // TODO(https://crbug.com/554590): Remove this counter when it's no longer
+     // necessary.

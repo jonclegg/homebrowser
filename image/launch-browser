@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+"""Launch the Fury core for cdp-server.
+
+cdp-server runs the browser pool, GeoIP and native input, and starts the browser
+with fingerprint flags: --fingerprint=<seed>, --fingerprint-platform,
+--fingerprint-timezone, --lang and so on. HOMEBROWSER_BINARY_PATH points it
+here instead. This turns those flags into a Fury persona config, hands the
+config to the core on descriptor 3 (--fury-fp-fd=3), and execs the core in this
+process, so cdp-server's handle on it stays valid.
+
+The persona is a real machine from Fury's catalogue (browser/personas/personas.json, made
+by `cargo run -p fury-shared --example catalogue` in Fury).
+It is chosen among those whose screen is the container's Xvfb display, so the
+screen a page measures is the one the window is really on, and the seed picks
+among them, so a profile keeps its machine across restarts.
+"""
+
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+import geoip2.database
+from homebrowser_launcher.geoip import _ensure_geoip_db
+
+CORE = "/opt/fury/chrome"
+PERSONAS = "/opt/fury/personas.json"
+# What Fury's catalogue persona does not carry and a real Mac reports: WebGL2
+# limits, shader precision, the WebGL2 extension list and the voice list,
+# measured from Chrome on an Apple Silicon Mac. Without them the container's
+# software renderer and empty voice list show through (read by patches 0034, 0042).
+MAC_MEASURED = "/opt/fury/mac-measured.json"
+# Chrome's current stable build, which the persona claims in place of the core's
+# own. The core is built from 155.0.8059.12, a beta every Fury build reports;
+# a bot-check vendor blocks that exact version (measured: blocked as .12, passes
+# as any other build). Bump it when Chrome stable moves on.
+STABLE_FULL_VERSION = "155.0.8059.39"
+# WebGPU subgroup widths (min, max) per persona GPU vendor, read by patch 0043 in
+# place of SwiftShader's 4. Apple measured (M-series, Chrome 154); NVIDIA is its
+# fixed 32-wide warp; AMD (RDNA wave32/wave64) and Intel (SIMD8 to SIMD32) are
+# their hardware ranges, not measured.
+SUBGROUP_SIZES = {"apple": (32, 32), "nvidia": (32, 32), "amd": (32, 64), "intel": (8, 32)}
+# Codecs VideoToolbox decodes in hardware per Apple chip generation: H.264,
+# HEVC and VP9 on all of them, AV1 from M3 on (measured on an M5: all four).
+APPLE_HARDWARE_DECODERS = {"M1": ["h264", "hevc", "vp9"], "M2": ["h264", "hevc", "vp9"],
+                           "M3": ["h264", "hevc", "vp9", "av1"], "M4": ["h264", "hevc", "vp9", "av1"],
+                           "M5": ["h264", "hevc", "vp9", "av1"]}
+MASK64 = (1 << 64) - 1
+OPENBOX_SYSTEM_CONFIG = "/etc/xdg/openbox/rc.xml"
+OPENBOX_CONFIG = "/root/.config/openbox/rc.xml"
+
+
+def flag_values(argv):
+    values = {}
+    for arg in argv:
+        if arg.startswith("--") and "=" in arg:
+            name, value = arg[2:].split("=", 1)
+            values[name] = value
+    return values
+
+
+# Fury's sub-seed, from shared-rs/src/persona.rs (mix, sub_seed), so a profile
+# gets the same noise here as it would from Fury's own agent.
+def mix(z):
+    z = (z + 0x9E3779B97F4A7C15) & MASK64
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & MASK64
+    return z ^ (z >> 31)
+
+
+def sub_seed(seed, purpose):
+    h = seed
+    for byte in purpose.encode():
+        h = mix(h ^ byte)
+    return mix(h) & 0x7FFFFFFF
+
+
+def choose_persona(platform, seed):
+    width, height = (int(n) for n in os.environ.get("HOMEBROWSER_DISPLAY_SIZE", "1920x1080").split("x"))
+    wanted_os = {"macos": "macOS", "windows": "Windows"}[platform]
+    with open(PERSONAS) as f:
+        personas = json.load(f)
+    matching = [
+        p for p in personas
+        if p["os"] == wanted_os
+        and round(p["screen"]["width"] * p["screen"]["devicePixelRatio"]) == width
+        and round(p["screen"]["height"] * p["screen"]["devicePixelRatio"]) == height
+    ]
+    if not matching:
+        raise SystemExit(f"launch-browser: no {wanted_os} persona has a {width}x{height} screen; "
+                         f"set HOMEBROWSER_DISPLAY_SIZE to one that a catalogue persona has")
+    # Weighted by how common the machine is, as Fury's own pick is.
+    point = (mix(seed) % 1_000_000) / 1_000_000 * sum(p["weight"] for p in matching)
+    for persona in matching:
+        point -= persona["weight"]
+        if point < 0:
+            return persona
+    return matching[-1]
+
+
+def apple_chip(config):
+    """The persona's Apple chip generation ("M1" ... "M5") from its WebGL renderer."""
+    renderer = config["gpu"]["webglParams"]["UNMASKED_RENDERER_WEBGL"]
+    match = re.search(r"Apple (M\d)", renderer)
+    assert match, f"not an Apple renderer: {renderer}"
+    return match.group(1)
+
+
+def image_font_families():
+    """Families the image's own font packages installed, under /usr/share/fonts.
+
+    These are the Linux ones (Liberation, WenQuanYi, ...) that neither persona's
+    machine has; a Mac host's own fonts are mounted under /usr/local/share/fonts.
+    Measured: Liberation Sans rendered in a macOS profile without this.
+    """
+    # fc-scan reads the files themselves: for the macOS persona mac-fonts.conf
+    # rejects these from fontconfig, and fc-list then lists none of them. Chrome
+    # on Linux still answers a request for one with its metric-compatible stand-in
+    # (Liberation Sans gets Arial), so a page found them present unless hidden here.
+    listing = subprocess.run(["fc-scan", "--format", "%{family}\n", "/usr/share/fonts"],
+                             capture_output=True, text=True, check=True).stdout
+    families = set()
+    for line in listing.splitlines():
+        families.update(name.strip() for name in line.split(",") if name.strip())
+    # Not files in the image: Chrome on Linux answers these croscore names with
+    # their metric-compatible counterparts (Arial, Times New Roman, Courier New),
+    # so they measured as present with the Mac's own fonts mounted.
+    return families | {"Arimo", "Tinos", "Cousine"}
+
+
+# Chrome's default fonts per generic family, as Chrome on a Mac has them. Linux
+# Chrome takes cursive and fantasy from its own defaults (Comic Sans MS, Impact)
+# rather than fontconfig, so mac-fonts.conf cannot reach them. Measured against
+# Chrome 154 on macOS with the same fonts: cursive is Apple Chancery, fantasy
+# Papyrus.
+MAC_DEFAULT_FONTS = {"standard": "Times", "serif": "Times", "sansserif": "Helvetica",
+                     "fixed": "Menlo", "cursive": "Apple Chancery", "fantasy": "Papyrus"}
+
+
+def set_default_fonts(user_data_dir, fonts):
+    """Merge Chrome's default-font preferences into the profile before it starts."""
+    path = os.path.join(user_data_dir, "Default", "Preferences")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    preferences = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            preferences = json.load(f)
+    webprefs = preferences.setdefault("webkit", {}).setdefault("webprefs", {}).setdefault("fonts", {})
+    for family, font in fonts.items():
+        webprefs[family] = {"Zyyy": font}
+    with open(path, "w") as f:
+        json.dump(preferences, f)
+
+
+def reserve_persona_desktop(screen):
+    """Give openbox the persona's menu bar and Dock (or taskbar) as screen margins.
+
+    The window is then started maximized, which fills exactly the persona's
+    available area. Maximized is the only state in which Linux Chrome draws no
+    frame of its own: un-maximized it keeps a 4 px border, so the page started
+    4 px right of window.screenX while the persona reports outerWidth ==
+    innerWidth, and every mouse event's screenX disagreed with its window.
+    Measured: events at +4, window at 0. cdp-server's /input treats a maximized
+    window as borderless too, so clicks land where they are aimed.
+    """
+    dpr = screen["devicePixelRatio"]
+    margins = {
+        "top": screen["availTop"],
+        "left": screen["availLeft"],
+        "bottom": screen["height"] - screen["availTop"] - screen["availHeight"],
+        "right": screen["width"] - screen["availLeft"] - screen["availWidth"],
+    }
+    block = "<margins>" + "".join(f"<{side}>{round(value * dpr)}</{side}>" for side, value in margins.items()) + "</margins>"
+    with open(OPENBOX_SYSTEM_CONFIG) as f:
+        config = f.read()
+    config, count = re.subn(r"<margins>.*?</margins>", block, config, flags=re.S)
+    assert count == 1, "openbox rc.xml has no <margins> block"
+    # One desktop, and nothing bound on the bare desktop. A click that lands below
+    # the window (off the page) puts the pointer there, and openbox's default wheel
+    # binding then switches to an empty desktop: the window vanished from the
+    # display while Chrome still reported it maximized, and every later click went
+    # nowhere (a whole shard's Bing entries failed).
+    config, count = re.subn(r"(<desktops>.*?<number>)\d+(</number>)", r"\g<1>1\2", config, flags=re.S)
+    assert count == 1, "openbox rc.xml has no <desktops><number>"
+    config, count = re.subn(r'<context name="Root">.*?</context>', '<context name="Root"></context>', config, flags=re.S)
+    assert count == 1, "openbox rc.xml has no Root mouse context"
+    # No openbox key bindings: the agent sends real keys, and openbox's defaults
+    # switch desktops (C-A-arrows, W-F1..F4), hide every window (W-d) or close
+    # one (A-F4).
+    config, count = re.subn(r"<keybind key=.*?</keybind>\s*", "", config, flags=re.S)
+    assert count > 0, "openbox rc.xml has no key bindings to remove"
+    os.makedirs(os.path.dirname(OPENBOX_CONFIG), exist_ok=True)
+    with open(OPENBOX_CONFIG, "w") as f:
+        f.write(config)
+    subprocess.run(["openbox", "--reconfigure"], check=True)
+    # The desktop count in rc.xml is read only when openbox starts; set it now.
+    subprocess.run(["xdotool", "set_num_desktops", "1"], check=True)
+
+
+def languages_for(locale):
+    language = locale.split("-")[0]
+    if language == "en":
+        return [locale, "en"] if locale != "en" else ["en-US", "en"]
+    return [locale, language, "en-US", "en"]
+
+
+def geolocation_for(ip):
+    with geoip2.database.Reader(str(_ensure_geoip_db())) as reader:
+        location = reader.city(ip).location
+    return {"latitude": location.latitude, "longitude": location.longitude, "accuracy": 20000.0}
+
+
+def main():
+    argv = sys.argv[1:]
+    flags = flag_values(argv)
+    seed = int(flags["fingerprint"])
+    platform = flags.get("fingerprint-platform", "windows")
+    timezone = flags["fingerprint-timezone"]
+    locale = flags["lang"]
+
+    persona = choose_persona(platform, seed)
+    config = persona["config"]
+    config["locale"] = {"timezone": timezone, "locale": locale}
+    config["navigator"]["languages"] = languages_for(locale)
+    # Canvas noise only. clientRects noise moves element boxes off the 1/64 px grid
+    # every real Chrome layout lands on (measured: 224.9845 against 224.9844).
+    # Audio noise turns the host's real audio fingerprint, which is the one every
+    # machine of its CPU family answers, into a value no machine answers: without
+    # it the container gives 124.0434748024636, exactly Chrome on an M-series Mac.
+    config["noise"] = {"canvasSeed": sub_seed(seed, "canvas")}
+    config["noise"]["deviceIdSalt"] = sub_seed(seed, "deviceId")
+    config["fontsHidden"] = sorted(set(config["fontsHidden"]) | image_font_families())
+    # Fury's derivation writes [], and Chrome on a desktop answers ["Desktop"]:
+    # measured against a stock Chrome 146 on the same page.
+    config["clientHints"]["formFactors"] = ["Desktop"]
+    # Google Chrome has a translate service, and with it Blink gives <a> its
+    # hrefTranslate (patch 0054); the core has no Google API keys and no service
+    # (measured: HTMLAnchorElement has 33 members on a Mac, 32 without).
+    config["translate"] = {"serviceAvailable": True}
+    core_version = config["clientHints"]["fullVersion"]
+    config["clientHints"]["fullVersion"] = STABLE_FULL_VERSION
+    config["clientHints"]["fullVersionList"] = [entry.replace(core_version, STABLE_FULL_VERSION)
+                                                for entry in config["clientHints"]["fullVersionList"]]
+    exit_ip = flags.get("fingerprint-webrtc-ip")
+    if exit_ip and not ipaddress.ip_address(exit_ip).is_private:
+        config["geolocation"] = geolocation_for(exit_ip)
+
+    if platform == "macos":
+        set_default_fonts(flags["user-data-dir"], MAC_DEFAULT_FONTS)
+        with open(MAC_MEASURED) as f:
+            measured = json.load(f)
+        config["gpu"].update(measured["gpu"])
+        config.setdefault("speech", {}).update(measured["speech"])
+        # What Chrome on a Mac answers and a Linux host does not (patches
+        # 0045-0048, 0051), measured against Chrome 154 on an M5 Mac with
+        # research/audit.py: text set as CoreText sets it, macOS system colors,
+        # HEVC and the hardware codecs VideoToolbox has, Touch ID and passkeys,
+        # a Bluetooth radio, the Mac US keyboard's ISO key, and BarcodeDetector.
+        config["text"] = {"rendering": "mac"}
+        config["systemColors"] = measured["systemColors"]
+        config["media"] = {"hevc": True,
+                           "hardwareDecoders": APPLE_HARDWARE_DECODERS[apple_chip(config)],
+                           "hardwareEncoders": ["h264", "hevc"]}
+        config["webauthn"] = measured["webauthn"]
+        config["bluetooth"] = {"available": True}
+        config["keyboard"] = {"layoutOverrides": measured["keyboardLayoutOverrides"]}
+        config["barcodeDetector"] = {"formats": measured["barcodeFormats"]}
+        # VideoToolbox's H.264 High and H.265, which Chrome on a Mac lists after its
+        # software codecs; a WebRTC offer numbers its payload types from the list.
+        config["webrtc"] = {"encoderFormats": measured["webrtcEncoderFormats"],
+                            "decoderFormats": measured["webrtcDecoderFormats"]}
+        # Chrome's own tier rule (content/browser/cpu_performance): an M-series
+        # chip with 8 or more cores is "ultra" (4), else it goes by core count.
+        cores = config["navigator"]["hardwareConcurrency"]
+        config["navigator"]["cpuPerformance"] = 4 if cores >= 8 else 3 if cores >= 5 else 2
+        # Chrome 154 on an Apple GPU also offers subgroup-size-control, which the
+        # catalogue's Apple list predates.
+        if "webgpu" in config["gpu"]:
+            config["gpu"]["webgpu"]["features"] = measured["webgpuFeatures"]
+    # The adapter a hardware GPU presents (patch 0043); without a GPU the core's
+    # adapter is SwiftShader, which says it is a fallback adapter with 4-wide
+    # subgroups and prefers rgba8unorm, the Linux canvas format. Macs and Windows
+    # PCs prefer bgra8unorm. One catalogue machine has no WebGPU at all.
+    if "webgpu" in config["gpu"]:
+        webgpu = config["gpu"]["webgpu"]
+        # The persona GPU's whole feature list (patch 0049); SwiftShader alone
+        # lacks shader-f16, dual-source-blending and the texture tiers.
+        webgpu["reportPersonaFeatures"] = True
+        webgpu["isFallbackAdapter"] = False
+        webgpu["preferredCanvasFormat"] = "bgra8unorm"
+        webgpu["subgroupMinSize"], webgpu["subgroupMaxSize"] = SUBGROUP_SIZES[webgpu["vendor"]]
+
+    print(f"launch-browser: persona {persona['id']}, seed {seed}, {timezone}, {locale}", file=sys.stderr)
+
+    # Read to EOF by the core; unlinked so nothing else can open it.
+    with tempfile.NamedTemporaryFile("w", delete=False, dir="/tmp", prefix="fury-config-") as f:
+        json.dump(config, f)
+    fd = os.open(f.name, os.O_RDONLY)
+    os.unlink(f.name)
+    # cdp-server starts this with only 0-2 open, so the open above is usually
+    # descriptor 3 already, and dup2 onto itself keeps Python's close-on-exec.
+    os.dup2(fd, 3)
+    os.set_inheritable(3, True)
+
+    reserve_persona_desktop(config["screen"])
+    # Linux Chromium leaves out APIs that Chrome on a Mac or Windows PC has, and a
+    # Mac user agent without them is a Linux machine to anyone who looks.
+    # Measured in the container: no navigator.share, canShare or bluetooth, no
+    # WebGPU adapter, no media devices. Each comes back with its switch.
+    features = ["Vulkan", "WebShare", "WebBluetooth"]
+    # JPEG XL puts image/jxl in every Accept header, which no Chrome release sends.
+    disabled_features = ["JXLImageFormat"]
+    # --enable-unsafe-webgpu also exposes WebGPU's experimental interfaces
+    # (GPUResourceTable, GPUSubgroupMatrixConfig, writeTimestamp, multiDraw*),
+    # which no stable Chrome has; the adapter stays without them (measured).
+    blink_disabled = ["WebGPUExperimentalFeatures", "WebGPUExperimentalResourceTable"]
+    blink_enabled = []
+    color_profile = []
+    if platform == "macos":
+        # Chrome on a Mac has BarcodeDetector (macOS supplies the detector; patch
+        # 0048 answers its formats) and no Notification.image, which Blink ships
+        # only off the Mac.
+        blink_enabled.append("BarcodeDetector")
+        # AAC encoding (MediaRecorder audio/mp4, AudioEncoder mp4a) is the
+        # platform's; Chrome on a Mac has it (AudioToolbox), Linux keeps it off.
+        features.append("PlatformAudioEncoder")
+        blink_disabled.append("NotificationContentImage")
+        # Every Mac laptop since 2016 has a P3 display; the container's is sRGB.
+        color_profile = ["--force-color-profile=display-p3-d65"]
+    args = []
+    for arg in argv:
+        if arg.startswith("--fingerprint"):
+            continue
+        for prefix, target in (("--enable-features=", features), ("--disable-features=", disabled_features),
+                               ("--enable-blink-features=", blink_enabled), ("--disable-blink-features=", blink_disabled)):
+            if arg.startswith(prefix):
+                target += arg.split("=", 1)[1].split(",")
+                break
+        else:
+            args.append(arg)
+    args += color_profile + [
+        f"--enable-features={','.join(features)}",
+        f"--disable-features={','.join(disabled_features)}",
+        f"--disable-blink-features={','.join(blink_disabled)}",
+    ] + ([f"--enable-blink-features={','.join(blink_enabled)}"] if blink_enabled else []) + [
+        # SwiftShader-backed 2D canvas spends ~300 ms on a page's first draw and
+        # toDataURL (measured; 2 ms in software), and a bot-check vendor times exactly that.
+        "--disable-accelerated-2d-canvas",
+        "--enable-unsafe-webgpu",
+        "--use-vulkan=swiftshader",
+        # One microphone, one speaker and one camera, as a laptop has. Labels stay
+        # empty until a site is granted the permission, as they are on Chrome.
+        "--use-fake-device-for-media-stream",
+        "--fury-fp-fd=3",
+        # Fills the persona's available area: under the menu bar and above the
+        # Dock on a Mac, above the taskbar on Windows (reserve_persona_desktop).
+        "--start-maximized",
+        # No GPU in the container: WebGL and WebGPU come from SwiftShader, which
+        # Chromium no longer falls back to on its own.
+        "--enable-unsafe-swiftshader",
+        # cdp-server passes --no-sandbox (the container runs as root), and
+        # Chromium answers it with an "unsupported command-line flag" bar that
+        # shrinks the page. --test-type is the switch that suppresses that bar.
+        "--test-type",
+        # What Fury's agent passes: field-trial testing config force-enables
+        # features real stable Chrome ships disabled (launcher.rs).
+        "--disable-field-trial-config",
+        # A permission prompt (location, notifications) is browser UI drawn over
+        # the page: CDP screenshots leave it out and it takes the clicks meant for
+        # the page under it (one site's location prompt covered its search box for
+        # a whole run). Answer each as "Never allow" instead of showing it.
+        "--deny-permission-prompts",
+        # Chrome stopped by a container restart offers "Restore pages?" in a bubble
+        # over the top right of the page, the same unseen click trap (it covered
+        # a store's search button for a whole run).
+        "--hide-crash-restore-bubble",
+    ]
+    os.execv(CORE, [CORE, *args])
+
+
+if __name__ == "__main__":
+    main()
