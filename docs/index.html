@@ -174,7 +174,8 @@
   dialog::backdrop { background: #050a15e8; }
   dialog img { border-radius: 12px; }
 
-  .copied { color: var(--lamp); font-size: 13px; min-height: 1em; }
+  .copied { color: var(--lamp); font-size: 13px; }
+  .copied:empty { display: none; }
   .reveal { opacity: 1; transform: none; transition: opacity .6s ease, transform .6s ease; }
   .js .reveal.pending { opacity: 0; transform: translateY(14px); }
   @media (prefers-reduced-motion: reduce) { .js .reveal.pending { opacity: 1; transform: none; } }
@@ -215,7 +216,10 @@
       </div>
     </div>
     <div class="film reveal" id="film">
-      <video id="promo" src="media/stealthbox-promo.mp4" poster="media/stealthbox-promo-poster.jpg" playsinline muted loop preload="metadata" aria-label="A short animated film: a helper robot is turned away by a shop until it hides inside a Stealthbox"></video>
+      <video id="promo" poster="media/stealthbox-promo-poster.jpg" playsinline muted loop preload="metadata" aria-label="A short animated film: a helper robot is turned away by a shop until it hides inside a Stealthbox">
+        <source src="media/stealthbox-promo.webm" type="video/webm">
+        <source src="media/stealthbox-promo.mp4" type="video/mp4">
+      </video>
       <button class="btn play" type="button" id="sound">Play with sound</button>
     </div>
   </div>
