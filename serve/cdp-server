@@ -38,8 +38,8 @@ import aiohttp
 import websockets
 from aiohttp import web
 
-from homebrowser_launcher.browser import build_args, maybe_resolve_geoip, _resolve_webrtc_args, _normalize_socks_string_url
-from homebrowser_launcher.config import binary_supports_maximized_window
+from stealthbox_launcher.browser import build_args, maybe_resolve_geoip, _resolve_webrtc_args, _normalize_socks_string_url
+from stealthbox_launcher.config import binary_supports_maximized_window
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,7 +69,7 @@ BASE_CDP_PORT = 5100
 DEFAULT_SEED_FILE = ".cdp-server-seed"
 
 # Seeded identities are reaped after this many idle seconds unless
-# --idle-timeout / HOMEBROWSER_IDLE_TIMEOUT says otherwise. The default identity
+# --idle-timeout / STEALTHBOX_IDLE_TIMEOUT says otherwise. The default identity
 # is exempt: it is the long-lived one, and a viewer may be using it with no CDP
 # client attached.
 DEFAULT_IDLE_TIMEOUT = 300.0
@@ -1184,10 +1184,10 @@ async def on_shutdown(app: web.Application) -> None:
 # ---------------------------------------------------------------------------
 
 def _default_data_dir() -> str:
-    """Smart default: container → /tmp/cdp-server, bare metal → ~/.homebrowser/cdp-server."""
+    """Smart default: container → /tmp/cdp-server, bare metal → ~/.stealthbox/cdp-server."""
     if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
         return "/tmp/cdp-server"
-    return str(Path.home() / ".homebrowser" / "cdp-server")
+    return str(Path.home() / ".stealthbox" / "cdp-server")
 
 
 def _parse_idle_timeout(value: str) -> float:
@@ -1201,7 +1201,7 @@ def _parse_idle_timeout(value: str) -> float:
 
 
 def _default_idle_timeout() -> float:
-    value = os.environ.get("HOMEBROWSER_IDLE_TIMEOUT")
+    value = os.environ.get("STEALTHBOX_IDLE_TIMEOUT")
     if value is None:
         return DEFAULT_IDLE_TIMEOUT
     return _parse_idle_timeout(value)
@@ -1235,8 +1235,8 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
         "default_timezone": None,
         "default_fingerprint_args": [],
         "idle_timeout": _default_idle_timeout(),
-        "max_processes": _parse_max_processes(os.environ.get("HOMEBROWSER_MAX_PROCESSES", str(DEFAULT_MAX_PROCESSES))),
-        "geoip": _parse_bool(os.environ.get("HOMEBROWSER_GEOIP", "false")),
+        "max_processes": _parse_max_processes(os.environ.get("STEALTHBOX_MAX_PROCESSES", str(DEFAULT_MAX_PROCESSES))),
+        "geoip": _parse_bool(os.environ.get("STEALTHBOX_GEOIP", "false")),
     }
     passthrough = []
     # Flags consumed by cdp-server (not passed to Chrome)
@@ -1292,7 +1292,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
 
 def main() -> None:
     # The image always names its browser (image/launch-browser).
-    binary = os.environ["HOMEBROWSER_BINARY_PATH"]
+    binary = os.environ["STEALTHBOX_BINARY_PATH"]
     config, global_args = parse_cli_args(sys.argv[1:])
 
     if config["default_seed"] and (

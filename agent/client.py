@@ -1,7 +1,7 @@
-"""`homebrowser chat`, `run`, `cancel`, `notes`, `key`, `password`, `smoke`, `share`, `status`: a client for the chat API.
+"""`stealthbox chat`, `run`, `cancel`, `notes`, `key`, `password`, `smoke`, `share`, `status`: a client for the chat API.
 
-Standard library only. It runs inside the container (`docker exec homebrowser
-homebrowser <command>`), so the host needs nothing but Docker.
+Standard library only. It runs inside the container (`docker exec stealthbox
+stealthbox <command>`), so the host needs nothing but Docker.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ import urllib.error
 import urllib.request
 import webbrowser
 
-API_URL = os.environ.get("HOMEBROWSER_API_URL") or f"http://127.0.0.1:{os.environ.get('HOMEBROWSER_API_PORT') or 8423}"
-DATA_DIR = os.environ.get("HOMEBROWSER_DATA_DIR") or os.path.expanduser("~/.homebrowser/data")
+API_URL = os.environ.get("STEALTHBOX_API_URL") or f"http://127.0.0.1:{os.environ.get('STEALTHBOX_API_PORT') or 8423}"
+DATA_DIR = os.environ.get("STEALTHBOX_DATA_DIR") or os.path.expanduser("~/.stealthbox/data")
 
 
 def token():
     path = os.path.join(DATA_DIR, "api-token")
     if not os.path.exists(path):
-        raise SystemExit(f"No API token at {path}. Is Homebrowser running? Try: homebrowser start")
+        raise SystemExit(f"No API token at {path}. Is Stealthbox running? Try: stealthbox start")
     with open(path) as fh:
         return fh.read().strip()
 
@@ -38,10 +38,10 @@ def call(method, path, body=None, timeout=None):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
-        raise SystemExit(f"Homebrowser API {exc.code}: {exc.read().decode()[:500]}") from exc
+        raise SystemExit(f"Stealthbox API {exc.code}: {exc.read().decode()[:500]}") from exc
     except urllib.error.URLError as exc:
-        raise SystemExit(f"Cannot reach the Homebrowser API at {API_URL}: {exc.reason}. "
-                         f"Try: homebrowser start") from exc
+        raise SystemExit(f"Cannot reach the Stealthbox API at {API_URL}: {exc.reason}. "
+                         f"Try: stealthbox start") from exc
 
 
 SHARE_NOTE = "The console asks for the console password, which only the user knows."
@@ -70,15 +70,15 @@ def print_run(run):
     for note in run.get("notes_written") or []:
         print(f"noted:   {note['site']}: {note['text']}")
     print(f"run:     {run['run']}")
-    print(f"session: {run['session']}   (continue with: homebrowser chat --session {run['session']} \"...\")")
+    print(f"session: {run['session']}   (continue with: stealthbox chat --session {run['session']} \"...\")")
 
 
 PAGES = {
-    "key": {"field": "key_setup", "again": "homebrowser key --wait",
+    "key": {"field": "key_setup", "again": "stealthbox key --wait",
             "opened": "The page is open; waiting for the key to be submitted.",
             "rejected": "That was not saved",
             "saved": "Saved. OpenRouter accepted the key."},
-    "password": {"field": "password_setup", "again": "homebrowser password",
+    "password": {"field": "password_setup", "again": "stealthbox password",
                  "opened": "The page is open; waiting for the password to be submitted.",
                  "rejected": "That was not saved",
                  "saved": "Console password saved. Every device that was signed in is signed out."},
@@ -86,7 +86,7 @@ PAGES = {
 
 
 def wait_for_page(page):
-    """Report what happens to the latest `homebrowser key` or `homebrowser password` link until it is settled."""
+    """Report what happens to the latest `stealthbox key` or `stealthbox password` link until it is settled."""
     messages = PAGES[page]
     print("Waiting for the page (the link lasts 15 minutes)...", flush=True)
     last = None
@@ -110,10 +110,10 @@ def wait_for_page(page):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="homebrowser")
+    parser = argparse.ArgumentParser(prog="stealthbox")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    chat = commands.add_parser("chat", help="send Homebrowser a message; it works the browser and replies")
+    chat = commands.add_parser("chat", help="send Stealthbox a message; it works the browser and replies")
     chat.add_argument("message")
     chat.add_argument("--session", help="continue this session (same tab, same conversation)")
     chat.add_argument("--max-stuck-steps", type=int, default=12,
@@ -128,12 +128,12 @@ def main():
     cancel = commands.add_parser("cancel", help="stop a run")
     cancel.add_argument("run")
 
-    notes = commands.add_parser("notes", help="what Homebrowser has learned, per site")
+    notes = commands.add_parser("notes", help="what Stealthbox has learned, per site")
     notes.add_argument("site", nargs="?")
 
     key = commands.add_parser("key", help="open a page to paste the OpenRouter key into")
     key.add_argument("--in-browser", action="store_true",
-                     help="open it in Homebrowser's own browser, for use through the viewer")
+                     help="open it in Stealthbox's own browser, for use through the viewer")
     key.add_argument("--json", action="store_true", help="print the link instead of opening it")
     key.add_argument("--wait", action="store_true",
                      help="after printing the link, wait until the key is saved, rejected, or the link expires")
@@ -167,7 +167,7 @@ def main():
         if args.json:
             print(json.dumps(run, indent=2))
         elif args.no_wait:
-            print(f"run {run['run']} queued in session {run['session']}; check it with: homebrowser run {run['run']}")
+            print(f"run {run['run']} queued in session {run['session']}; check it with: stealthbox run {run['run']}")
         else:
             print_run(run)
         return 0 if run["status"] in ("done", "needs_input", "needs_user", "queued") else 1
@@ -199,14 +199,14 @@ def main():
             return 0
         if args.wait:
             if args.in_browser:
-                print("Opened the setup page in Homebrowser's browser; the user fills it in there "
-                      "through the console (a `homebrowser share` link).", flush=True)
+                print("Opened the setup page in Stealthbox's browser; the user fills it in there "
+                      "through the console (a `stealthbox share` link).", flush=True)
             else:
                 print(f"Paste the OpenRouter key into: {link['setup_url']}", flush=True)
             return wait_for_page("key")
         if args.in_browser:
-            print("Opened the key page in Homebrowser's browser. Paste the key there "
-                  "(through the viewer, or `homebrowser share` from a phone).")
+            print("Opened the key page in Stealthbox's browser. Paste the key there "
+                  "(through the viewer, or `stealthbox share` from a phone).")
         elif webbrowser.open(link["setup_url"]):
             print(f"Opened {link['setup_url']}\nPaste the key there; it is checked and saved on this machine.")
         else:
@@ -245,9 +245,9 @@ def main():
         if args.json:
             print(json.dumps({"event": "share_ready", **link}))
             return 0
-        print(f"{link['url']}\n\nThe Homebrowser console: every session, the live browser, and what needs you.\n"
-              f"{share_note(link)}\nThe link stays the same when Homebrowser restarts or updates.\n"
-              "Stop it with: homebrowser unshare. The next share has a new address, so devices sign in again.")
+        print(f"{link['url']}\n\nThe Stealthbox console: every session, the live browser, and what needs you.\n"
+              f"{share_note(link)}\nThe link stays the same when Stealthbox restarts or updates.\n"
+              "Stop it with: stealthbox unshare. The next share has a new address, so devices sign in again.")
         return 0
 
     if args.command == "unshare":
@@ -265,7 +265,7 @@ def main():
             print(json.dumps(result, indent=2))
         else:
             print(f"browser connected: {result['browser_connected']}\nmodel: {result['model']}\n"
-                  f"openrouter key: {'set' if result['openrouter_key'] else 'missing (run: homebrowser key)'}\n"
+                  f"openrouter key: {'set' if result['openrouter_key'] else 'missing (run: stealthbox key)'}\n"
                   f"queue: {result['queue_depth']}")
         return 0
 

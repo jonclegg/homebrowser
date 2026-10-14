@@ -1,28 +1,28 @@
 #!/bin/sh
 # One-step install or update for macOS and Linux:
-#   gh api repos/jonclegg/homebrowser/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
+#   gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
 #
 # The repository is private, so the GitHub CLI must be signed in (gh auth login);
 # the image build reads the browser core release with the same login.
 #
 # POSIX sh (runs under dash, BusyBox ash, bash and zsh). Everything is inside main(), so a
-# partially downloaded script never runs. The app lives in ~/.homebrowser/app and is replaced
+# partially downloaded script never runs. The app lives in ~/.stealthbox/app and is replaced
 # wholesale from a GitHub tarball on every run: local edits never block an update, and the
-# previous copy is kept in ~/.homebrowser/app.previous. Your .env settings carry over.
+# previous copy is kept in ~/.stealthbox/app.previous. Your .env settings carry over.
 #
-# Optional: HOMEBROWSER_TARBALL_URL installs from a tarball at that URL instead.
-# Arguments go to `homebrowser start`: `| sh -s -- --force-onboard` shows the first-run
+# Optional: STEALTHBOX_TARBALL_URL installs from a tarball at that URL instead.
+# Arguments go to `stealthbox start`: `| sh -s -- --force-onboard` shows the first-run
 # next steps even when the OpenRouter key is set.
 #
 # For agents running this for a user: without a container engine the installer
-# changes nothing and exits 3 after a line starting "HOMEBROWSER_NEEDS: docker".
+# changes nothing and exits 3 after a line starting "STEALTHBOX_NEEDS: docker".
 # Ask the user whether to install one, and if they agree, run it again with
-# HOMEBROWSER_INSTALL_DOCKER=yes. Exit 4 ("HOMEBROWSER_NEEDS: user") means a step
+# STEALTHBOX_INSTALL_DOCKER=yes. Exit 4 ("STEALTHBOX_NEEDS: user") means a step
 # only the user can do (a sudo password, a log out and in); it says which.
 set -eu
 
-TARBALL_URL="${HOMEBROWSER_TARBALL_URL:-}"
-STATE_DIR="${HOME:-}/.homebrowser"
+TARBALL_URL="${STEALTHBOX_TARBALL_URL:-}"
+STATE_DIR="${HOME:-}/.stealthbox"
 INSTALL_DIR="${STATE_DIR}/app"
 ORBSTACK_DOWNLOAD="https://orbstack.dev/download"
 ORBSTACK_MIN_MACOS=14
@@ -35,18 +35,18 @@ fail() {
 # No container engine and no consent to install one: change nothing, say what
 # would be installed, and let the agent ask the user.
 needs_docker() {
-  printf '\nHOMEBROWSER_NEEDS: docker\n%s\n\nTo install it, run this installer again with HOMEBROWSER_INSTALL_DOCKER=yes:\n  gh api repos/jonclegg/homebrowser/contents/install.sh -H "Accept: application/vnd.github.raw" | HOMEBROWSER_INSTALL_DOCKER=yes sh\n\n' "$1" >&2
+  printf '\nSTEALTHBOX_NEEDS: docker\n%s\n\nTo install it, run this installer again with STEALTHBOX_INSTALL_DOCKER=yes:\n  gh api repos/jonclegg/stealthbox/contents/install.sh -H "Accept: application/vnd.github.raw" | STEALTHBOX_INSTALL_DOCKER=yes sh\n\n' "$1" >&2
   exit 3
 }
 
 # A step only the user can do.
 needs_user() {
-  printf '\nHOMEBROWSER_NEEDS: user\n%s\n\n' "$1" >&2
+  printf '\nSTEALTHBOX_NEEDS: user\n%s\n\n' "$1" >&2
   exit 4
 }
 
 install_docker_consented() {
-  [ "${HOMEBROWSER_INSTALL_DOCKER:-}" = yes ]
+  [ "${STEALTHBOX_INSTALL_DOCKER:-}" = yes ]
 }
 
 # sudo that never hangs on a password prompt nobody can see.
@@ -75,11 +75,11 @@ preflight() {
   [ -n "${HOME:-}" ] || fail "HOME is not set."
   if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
     fail "Run the installer as yourself, not with sudo:
-  gh api repos/jonclegg/homebrowser/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh"
+  gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh"
   fi
   need curl "Install curl, then run this again."
-  need gh "Install the GitHub CLI (https://cli.github.com) and sign in with gh auth login: Homebrowser is a private repository."
-  gh auth status >/dev/null 2>&1 || fail "Sign in to the GitHub CLI first (gh auth login): Homebrowser is a private repository."
+  need gh "Install the GitHub CLI (https://cli.github.com) and sign in with gh auth login: Stealthbox is a private repository."
+  gh auth status >/dev/null 2>&1 || fail "Sign in to the GitHub CLI first (gh auth login): Stealthbox is a private repository."
   need tar "Install tar, then run this again."
   need mktemp "Install coreutils, then run this again."
 }
@@ -108,7 +108,7 @@ macos_major() {
   sw_vers -productVersion | cut -d. -f1
 }
 
-# podman-docker answers to 'docker' but can't run Homebrowser's compose stack as-is.
+# podman-docker answers to 'docker' but can't run Stealthbox's compose stack as-is.
 docker_is_podman() {
   docker --version 2>/dev/null | grep -qi podman
 }
@@ -153,10 +153,10 @@ Install a Docker engine that supports your macOS, start it, then run this instal
   Docker Desktop:  https://docs.docker.com/desktop/setup/install/mac-install/
 Make sure 'docker info' and 'docker compose version' both work."
   fi
-  install_docker_consented || needs_docker "Homebrowser runs its browser in a container, and this Mac has no container engine.
+  install_docker_consented || needs_docker "Stealthbox runs its browser in a container, and this Mac has no container engine.
 It would install OrbStack, a lightweight container engine for macOS (free for personal use):
   https://orbstack.dev"
-  say "Homebrowser runs its browser in a container. Installing OrbStack, a lightweight container engine for macOS."
+  say "Stealthbox runs its browser in a container. Installing OrbStack, a lightweight container engine for macOS."
   if have_brew; then
     say "Installing OrbStack with Homebrew..."
     brew install --cask orbstack </dev/null
@@ -195,7 +195,7 @@ LINUX_DOCKER_COMMANDS='curl -fsSL https://get.docker.com | sudo sh
 # Docker Engine from Docker's own install script, with the user's consent.
 install_linux_docker() {
   can_sudo || needs_user "Installing Docker needs administrator rights, and sudo can't ask for a password here.
-Run these in your own terminal, then run the Homebrowser installer again:
+Run these in your own terminal, then run the Stealthbox installer again:
   ${LINUX_DOCKER_COMMANDS}"
   say "Installing Docker Engine with Docker's install script (https://get.docker.com)..."
   curl -fsSL --retry 3 https://get.docker.com | as_root sh
@@ -236,7 +236,7 @@ ensure_setfacl() {
     as_root apk add -q acl
   fi
   command -v setfacl >/dev/null 2>&1 || needs_user "Docker is set up, but this session can't use it until you log out and back in
-(the docker group applies at login). Do that, then run the Homebrowser installer again."
+(the docker group applies at login). Do that, then run the Stealthbox installer again."
 }
 
 linux_docker_info() {
@@ -248,17 +248,17 @@ linux_docker_info() {
 }
 
 ensure_linux_docker() {
-  linux_arch_ok || fail "Homebrowser on Linux supports amd64 (x86_64) and arm64 (aarch64). This machine is $(uname -m)."
-  need bash "Homebrowser's commands are bash scripts. Install bash (for example 'sudo apk add bash' on Alpine), then run this again."
+  linux_arch_ok || fail "Stealthbox on Linux supports amd64 (x86_64) and arm64 (aarch64). This machine is $(uname -m)."
+  need bash "Stealthbox's commands are bash scripts. Install bash (for example 'sudo apk add bash' on Alpine), then run this again."
   if docker_is_podman; then
-    fail "The 'docker' command here is Podman's Docker emulation (podman-docker), and Homebrowser needs Docker Engine.
+    fail "The 'docker' command here is Podman's Docker emulation (podman-docker), and Stealthbox needs Docker Engine.
 Replace it with Docker Engine, then run this installer again:
   sudo dnf remove podman-docker      (or: sudo apt-get remove podman-docker)
   curl -fsSL https://get.docker.com | sudo sh
   sudo usermod -aG docker \"\$USER\"   then log out and back in"
   fi
   if ! command -v docker >/dev/null 2>&1; then
-    install_docker_consented || needs_docker "Homebrowser runs its browser in a container, and Docker Engine is not installed.
+    install_docker_consented || needs_docker "Stealthbox runs its browser in a container, and Docker Engine is not installed.
 It would install Docker Engine with Docker's official script and let this user use it:
   ${LINUX_DOCKER_COMMANDS}"
     install_linux_docker
@@ -271,13 +271,13 @@ It would install Docker Engine with Docker's official script and let this user u
 ${info}
 It would start Docker and add this user to the docker group (needs sudo)."
         can_sudo || needs_user "Docker needs to be started and this user added to the docker group, and sudo can't ask for a password here.
-Run these in your own terminal, then run the Homebrowser installer again:
+Run these in your own terminal, then run the Stealthbox installer again:
   sudo systemctl enable --now docker
   sudo usermod -aG docker \"\$USER\""
         enable_linux_docker
         info="$(linux_docker_info)" || needs_user "Docker is set up, but this session still can't reach it:
 ${info}
-Log out and back in (so the docker group applies), then run the Homebrowser installer again."
+Log out and back in (so the docker group applies), then run the Stealthbox installer again."
         ;;
       *)
         if [ "$status" -eq 124 ]; then
@@ -310,7 +310,7 @@ checkout_dir() {
   esac
   [ -f "$0" ] || return 1
   dir="$(cd "$(dirname "$0")" && pwd)"
-  [ -f "${dir}/homebrowser" ] && [ -f "${dir}/docker-compose.yml" ] || return 1
+  [ -f "${dir}/stealthbox" ] && [ -f "${dir}/docker-compose.yml" ] || return 1
   say "$dir"
 }
 
@@ -318,30 +318,30 @@ install_app() {
   found="$(checkout_dir || true)"
   if [ -n "$found" ]; then
     INSTALL_DIR="$found"
-    say "Using the Homebrowser clone at ${INSTALL_DIR}"
+    say "Using the Stealthbox clone at ${INSTALL_DIR}"
     return 0
   fi
   mkdir -p "$STATE_DIR"
   rm -rf "${STATE_DIR}"/.download.*            # leftovers from an interrupted run
   # Stage inside STATE_DIR so the final swap is a same-filesystem rename.
   stage="$(mktemp -d "${STATE_DIR}/.download.XXXXXX")"
-  say "Downloading Homebrowser..."
+  say "Downloading Stealthbox..."
   if [ -n "$TARBALL_URL" ]; then
     curl -fsSL --retry 3 --connect-timeout 30 --max-time 600 -o "${stage}/app.tar.gz" "$TARBALL_URL"
   else
-    gh api repos/jonclegg/homebrowser/tarball/main > "${stage}/app.tar.gz"
+    gh api repos/jonclegg/stealthbox/tarball/main > "${stage}/app.tar.gz"
   fi
   mkdir "${stage}/x"
   tar -xzf "${stage}/app.tar.gz" -C "${stage}/x"
   new=""
   for d in "${stage}"/x/*; do
-    if [ -f "${d}/homebrowser" ] && [ -f "${d}/docker-compose.yml" ]; then
+    if [ -f "${d}/stealthbox" ] && [ -f "${d}/docker-compose.yml" ]; then
       new="$d"
     fi
   done
   if [ -z "$new" ]; then
     rm -rf "$stage"
-    fail "The download from ${TARBALL_URL:-jonclegg/homebrowser} doesn't look like Homebrowser."
+    fail "The download from ${TARBALL_URL:-jonclegg/stealthbox} doesn't look like Stealthbox."
   fi
   if [ -f "${INSTALL_DIR}/.env" ]; then
     cp -p "${INSTALL_DIR}/.env" "${new}/.env"
@@ -350,13 +350,13 @@ install_app() {
     rm -rf "${STATE_DIR}/app.previous"
     mv "$INSTALL_DIR" "${STATE_DIR}/app.previous"
     mv "$new" "$INSTALL_DIR"
-    say "Updated Homebrowser. The previous copy is in ${STATE_DIR}/app.previous"
+    say "Updated Stealthbox. The previous copy is in ${STATE_DIR}/app.previous"
   else
     mv "$new" "$INSTALL_DIR"
-    say "Installed Homebrowser in ${INSTALL_DIR}"
+    say "Installed Stealthbox in ${INSTALL_DIR}"
   fi
   rm -rf "$stage"
-  chmod +x "${INSTALL_DIR}/homebrowser" "${INSTALL_DIR}"/*.sh
+  chmod +x "${INSTALL_DIR}/stealthbox" "${INSTALL_DIR}"/*.sh
 }
 
 add_path_line() {
@@ -370,14 +370,14 @@ add_path_line() {
 }
 
 link_cli() {
-  target="${INSTALL_DIR}/homebrowser"
+  target="${INSTALL_DIR}/stealthbox"
   if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-    ln -sf "$target" /usr/local/bin/homebrowser
-    say "Installed the homebrowser command in /usr/local/bin."
+    ln -sf "$target" /usr/local/bin/stealthbox
+    say "Installed the stealthbox command in /usr/local/bin."
     return 0
   fi
   mkdir -p "${HOME}/.local/bin"
-  ln -sf "$target" "${HOME}/.local/bin/homebrowser"
+  ln -sf "$target" "${HOME}/.local/bin/stealthbox"
   # Login and interactive shells for zsh and bash. Fish users add ~/.local/bin themselves.
   add_path_line "${HOME}/.profile"
   add_path_line "${HOME}/.zprofile"
@@ -386,7 +386,7 @@ link_cli() {
   if [ -f "${HOME}/.bash_profile" ]; then
     add_path_line "${HOME}/.bash_profile"
   fi
-  say "Installed the homebrowser command in ${HOME}/.local/bin (new terminals pick it up)."
+  say "Installed the stealthbox command in ${HOME}/.local/bin (new terminals pick it up)."
 }
 
 main() {
@@ -394,12 +394,12 @@ main() {
   case "$(uname -s)" in
     Darwin) ensure_mac_engine ;;
     Linux) ensure_linux_docker ;;
-    *) fail "This installer is for macOS and Linux. On Windows, see https://github.com/jonclegg/homebrowser#quickstart" ;; # // pragma: allowlist secret
+    *) fail "This installer is for macOS and Linux. On Windows, see https://github.com/jonclegg/stealthbox#quickstart" ;; # // pragma: allowlist secret
   esac
   install_app
   link_cli
-  say "Starting Homebrowser..."
-  "${INSTALL_DIR}/homebrowser" start "$@" </dev/null
+  say "Starting Stealthbox..."
+  "${INSTALL_DIR}/stealthbox" start "$@" </dev/null
 }
 
 main "$@"

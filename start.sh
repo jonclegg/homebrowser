@@ -20,7 +20,7 @@ fail() {
   exit 1
 }
 
-echo "${bold}Homebrowser${reset} - starting the browser"
+echo "${bold}Stealthbox${reset} - starting the browser"
 echo
 
 source ./lib.sh
@@ -117,8 +117,8 @@ Open OrbStack from Applications and finish its setup, then run this again.
 elif ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   if [ "$(uname)" = "Darwin" ]; then
     fail "OrbStack is not installed, and no container engine is running.
-On a Mac, install Homebrowser with one command:
-  gh api repos/jonclegg/homebrowser/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
+On a Mac, install Stealthbox with one command:
+  gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
 Or install OrbStack, open it, then run this again:
   https://orbstack.dev/download"
   fi
@@ -148,7 +148,7 @@ export_host_timezone
 
 # The API writes notes, run logs and photos here. Create it as this user, so on
 # Linux the bind mount is ours and the API runs as us rather than root.
-mkdir -p "${HOMEBROWSER_DATA_DIR:-${HOME}/.homebrowser/data}"
+mkdir -p "${STEALTHBOX_DATA_DIR:-${HOME}/.stealthbox/data}"
 
 # On a Mac, present the browser as a Mac (docker-compose.mac.yml). Compose reads
 # COMPOSE_FILE from .env, so every later compose command picks it up too.
@@ -156,27 +156,27 @@ if [ "$(uname -s)" = "Darwin" ] && ! grep -qE '^COMPOSE_FILE=' .env; then
   printf '\n# Set by start.sh on a Mac: macOS persona, Retina screen, and Mac fonts.\nCOMPOSE_FILE=docker-compose.yml:docker-compose.mac.yml\n' >> .env
 fi
 
-echo "1/3 Building Homebrowser (the first time takes several minutes)..."
+echo "1/3 Building Stealthbox (the first time takes several minutes)..."
 # The browser core release is private: the build reads it with GITHUB_TOKEN,
 # by default the signed-in gh's.
 if [ -z "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
   GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
   export GITHUB_TOKEN
 fi
-[ -n "${GITHUB_TOKEN:-}" ] || fail "Building Homebrowser needs GITHUB_TOKEN, or gh signed in (gh auth login), to read the private browser core release."
-docker compose build --quiet homebrowser
+[ -n "${GITHUB_TOKEN:-}" ] || fail "Building Stealthbox needs GITHUB_TOKEN, or gh signed in (gh auth login), to read the private browser core release."
+docker compose build --quiet stealthbox
 
 echo "2/3 Starting the browser..."
-if ! up_log="$(docker compose up -d --force-recreate homebrowser 2>&1)"; then
+if ! up_log="$(docker compose up -d --force-recreate stealthbox 2>&1)"; then
   echo "$up_log"
   case "$up_log" in
     *"port is already allocated"*|*"address already in use"*|*"ports are not available"*)
       fail "Another program on this computer is already using port ${CDP_PORT}, ${VIEWER_PORT} or ${API_PORT}.
 Pick free ports in ${PWD}/.env, for example:
-  HOMEBROWSER_CDP_PORT=9333
-  HOMEBROWSER_VIEWER_PORT=6090
-  HOMEBROWSER_API_PORT=8433
-then run: homebrowser start"
+  STEALTHBOX_CDP_PORT=9333
+  STEALTHBOX_VIEWER_PORT=6090
+  STEALTHBOX_API_PORT=8433
+then run: stealthbox start"
       ;;
   esac
   fail "Docker could not start the browser. See the message above."
@@ -185,19 +185,19 @@ fi
 # The first start also downloads the GeoIP database (~70 MB).
 echo "3/3 Waiting for the browser to be ready..."
 for _ in $(seq 1 300); do
-  status="$(docker inspect -f '{{.State.Health.Status}}' homebrowser 2>/dev/null || echo missing)"
+  status="$(docker inspect -f '{{.State.Health.Status}}' stealthbox 2>/dev/null || echo missing)"
   [ "$status" = "healthy" ] && break
   sleep 2
 done
 
 if [ "$status" != "healthy" ]; then
-  docker compose logs --tail 40 homebrowser
-  fail "The browser did not become ready (status: $status). See the log above, or skills/homebrowser/SKILL.md > Troubleshooting."
+  docker compose logs --tail 40 stealthbox
+  fail "The browser did not become ready (status: $status). See the log above, or skills/stealthbox/SKILL.md > Troubleshooting."
 fi
 
-viewer_url="http://$(docker compose port homebrowser 6080)"
-cdp_url="http://$(docker compose port homebrowser 9222)"
-api_url="http://$(docker compose port homebrowser 8423)"
+viewer_url="http://$(docker compose port stealthbox 6080)"
+cdp_url="http://$(docker compose port stealthbox 9222)"
+api_url="http://$(docker compose port stealthbox 8423)"
 
 cat <<EOF
 
@@ -205,20 +205,20 @@ ${green}${bold}You're ready!${reset}
 
   See the browser:    ${viewer_url}
   Agents and scripts: ${cdp_url}   (Playwright, Puppeteer, or open this folder in your agent)
-  Chat with it:       homebrowser chat "<message>"   (API ${api_url})
-  Watch from a phone: homebrowser share
-  Stop everything:    homebrowser stop
+  Chat with it:       stealthbox chat "<message>"   (API ${api_url})
+  Watch from a phone: stealthbox share
+  Stop everything:    stealthbox stop
 
   Only this computer can connect. Your logins are kept between restarts.
 
 EOF
 
-# Homebrowser's own agent needs an OpenRouter key. Ask for it on a local page, never
+# Stealthbox's own agent needs an OpenRouter key. Ask for it on a local page, never
 # in a terminal an agent might be reading or in chat.
-if [ "$force_onboard" = yes ] || [ ! -s "${HOMEBROWSER_DATA_DIR:-${HOME}/.homebrowser/data}/openrouter.key" ]; then
+if [ "$force_onboard" = yes ] || [ ! -s "${STEALTHBOX_DATA_DIR:-${HOME}/.stealthbox/data}/openrouter.key" ]; then
   cat <<EOF
-  Next: homebrowser key     paste your OpenRouter key into the page it opens
-        homebrowser smoke example.com   check it can reach sites you use
+  Next: stealthbox key     paste your OpenRouter key into the page it opens
+        stealthbox smoke example.com   check it can reach sites you use
 
 EOF
 fi

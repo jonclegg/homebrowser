@@ -1,4 +1,4 @@
-"""Homebrowser's chat API. Runs inside the container, beside the browser.
+"""Stealthbox's chat API. Runs inside the container, beside the browser.
 
     POST /v1/chat                    {"message": "...", "session": null, "max_stuck_steps": 12, "wait": true}
                                      a run stops when max_stuck_steps steps in a row change nothing
@@ -94,23 +94,23 @@ import smoke  # noqa: E402
 from notebook import Notebook  # noqa: E402
 
 DATA_DIR = agent.DATA_DIR
-HOST_DATA_DIR = os.environ.get("HOMEBROWSER_HOST_DATA_DIR", "")
-PORT = int(os.environ.get("HOMEBROWSER_API_LISTEN_PORT", "8423"))
-HOST_PORT = os.environ.get("HOMEBROWSER_API_HOST_PORT") or str(PORT)
+HOST_DATA_DIR = os.environ.get("STEALTHBOX_HOST_DATA_DIR", "")
+PORT = int(os.environ.get("STEALTHBOX_API_LISTEN_PORT", "8423"))
+HOST_PORT = os.environ.get("STEALTHBOX_API_HOST_PORT") or str(PORT)
 CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:9222")
 VIEWER_PORT = 6080
 CONSOLE_PAGE = os.path.join(HERE, "console.html")
-CONSOLE_COOKIE = "homebrowser_console"
+CONSOLE_COOKIE = "stealthbox_console"
 PASSWORD_FILE = os.path.join(DATA_DIR, "console-password")
 DEVICES_FILE = os.path.join(DATA_DIR, "console-devices.json")
 SESSION_ID = re.compile(r"^s_[A-Za-z0-9_-]+$")
 # cloudflared's metrics in the `share` service: its address, and whether it is routable.
-SHARE_METRICS = os.environ.get("HOMEBROWSER_SHARE_METRICS", "http://share:20241")
+SHARE_METRICS = os.environ.get("STEALTHBOX_SHARE_METRICS", "http://share:20241")
 SHARE_URL_SECONDS = 60
 # The console's live preview of the browser, in the sidebar.
 PREVIEW_WIDTH = 320
 BROWSER_START_SECONDS = 300
-SESSION_IDLE_SECONDS = int(os.environ.get("HOMEBROWSER_SESSION_IDLE_SECONDS", "1800"))
+SESSION_IDLE_SECONDS = int(os.environ.get("STEALTHBOX_SESSION_IDLE_SECONDS", "1800"))
 # How long a run waits for a tab handed to it ("tab") to reach Playwright.
 BORROW_SECONDS = 10
 # Steps in a row that change nothing on the page before a run gives up.
@@ -192,9 +192,9 @@ def step_event(run, step):
 class Share:
     """The console's share link: a Cloudflare quick tunnel run by the `share` service
     (docker-compose.yml) in a container of its own, so restarting or updating
-    Homebrowser keeps its address, and with it every device signed in through it
-    (a device cookie belongs to one address). `homebrowser share` starts it and
-    `homebrowser unshare` stops it, on the host; this reads its address from
+    Stealthbox keeps its address, and with it every device signed in through it
+    (a device cookie belongs to one address). `stealthbox share` starts it and
+    `stealthbox unshare` stops it, on the host; this reads its address from
     cloudflared's metrics. It reaches this API (console, live viewer, routes), never
     CDP, and the console asks for the password.
     """
@@ -216,12 +216,12 @@ class Share:
         return f"https://{host}" if host else None
 
     def wait(self):
-        """The share's base URL once it is up; `homebrowser share` has just started it."""
+        """The share's base URL once it is up; `stealthbox share` has just started it."""
         deadline = time.time() + SHARE_URL_SECONDS
         while (url := self.url()) is None:
             if time.time() > deadline:
-                raise RuntimeError("Nothing is being shared. Start it with `homebrowser share` "
-                                   "on the computer running Homebrowser.")
+                raise RuntimeError("Nothing is being shared. Start it with `stealthbox share` "
+                                   "on the computer running Stealthbox.")
             time.sleep(0.5)
         return url
 
@@ -274,7 +274,7 @@ class Session:
             view = run.view(full=True)
             messages.append({"from": "you", "text": run.message, "time": run.started})
             messages.append({
-                "from": "homebrowser", "run": run.id, "status": run.status, "paused": run.paused,
+                "from": "stealthbox", "run": run.id, "status": run.status, "paused": run.paused,
                 "phase": view["phase"],
                 "text": run.reply, "time": run.finished, "cost_usd": view["cost_usd"],
                 "files": view["files"],
@@ -372,7 +372,7 @@ class Run:
         os.replace(tmp, os.path.join(self.dir, "run.json"))
 
 
-class Homebrowser:
+class Stealthbox:
     """Sessions, the run queue, and the worker that drives the browser."""
 
     def __init__(self):
@@ -397,7 +397,7 @@ class Homebrowser:
         if tab and session_id:
             raise ValueError("a tab starts a new session; leave out session")
         if not self._has_key():
-            raise PermissionError("No OpenRouter key yet. Run `homebrowser key` and paste it "
+            raise PermissionError("No OpenRouter key yet. Run `stealthbox key` and paste it "
                                   "into the page it opens.")
         with self.lock:
             if session_id:
@@ -471,7 +471,7 @@ class Homebrowser:
             if target is None:
                 raise LookupError(f"session {session.id} has no tab yet")
         if session is not None and session.state() in ("working", "waiting"):
-            raise RuntimeError("Homebrowser is working in this tab; stop or pause the run first")
+            raise RuntimeError("Stealthbox is working in this tab; stop or pause the run first")
         url = agent.typed_url(text)
         agent.navigate_tab(target, url)
         if session is not None:
@@ -526,7 +526,7 @@ class Homebrowser:
         }
 
     def setup_link(self, in_browser):
-        """A one-time key setup URL. In-browser, it opens in a new tab of Homebrowser's
+        """A one-time key setup URL. In-browser, it opens in a new tab of Stealthbox's
         own browser, for a user who is reaching the machine through the viewer."""
         code = self.setup_codes.issue()
         self.events.publish("key.issued", in_browser=in_browser)
@@ -632,7 +632,7 @@ class Homebrowser:
                 traceback.print_exc()
                 run.status = "failed"
                 run.error = f"{type(exc).__name__}: {exc}"
-                run.reply = run.reply or f"Homebrowser hit an internal error: {exc}"
+                run.reply = run.reply or f"Stealthbox hit an internal error: {exc}"
             finally:
                 run.finished = now()
                 run.session.last_used = time.time()
@@ -755,11 +755,11 @@ class Homebrowser:
         run.status = status
         run.reply = reply
         if status == "needs_user":
-            # The link when the share is on; otherwise the caller starts it (`homebrowser share`).
+            # The link when the share is on; otherwise the caller starts it (`stealthbox share`).
             shared = self.share.url() is not None
             run.needs_user = {"task": reply, "share_url": self.share_link(session.id)["url"] if shared else None}
         session.conversation.append({"role": "caller", "text": run.message})
-        session.conversation.append({"role": "homebrowser", "text": reply})
+        session.conversation.append({"role": "stealthbox", "text": reply})
 
         entry = {
             "time": run.started, "run": run.id, "session": session.id,
@@ -783,9 +783,9 @@ def load_token():
         return fh.read().strip()
 
 
-def make_handler(homebrowser, token):
+def make_handler(stealthbox, token):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "homebrowser"
+        server_version = "stealthbox"
 
         def log_message(self, fmt, *args):
             sys.stderr.write(f"api {self.address_string()} {fmt % args}\n")
@@ -807,7 +807,7 @@ def make_handler(homebrowser, token):
             return cookie[CONSOLE_COOKIE].value if CONSOLE_COOKIE in cookie else ""
 
         def _device(self):
-            return homebrowser.devices.find(self._console_cookie(), self.headers.get("Host"))
+            return stealthbox.devices.find(self._console_cookie(), self.headers.get("Host"))
 
         def _authorized(self):
             given = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
@@ -818,7 +818,7 @@ def make_handler(homebrowser, token):
             origin = self.headers.get("Origin")
             if self._device() is not None and (origin is None or urlparse(origin).netloc == self.headers.get("Host")):
                 return True
-            self._send(401, {"error": "missing or wrong bearer token (see ~/.homebrowser/data/api-token), "
+            self._send(401, {"error": "missing or wrong bearer token (see ~/.stealthbox/data/api-token), "
                                       "or not signed in to the console"})
             return False
 
@@ -828,7 +828,7 @@ def make_handler(homebrowser, token):
 
         def _device_cookie(self):
             """Sign this browser in as a new device; returns its Set-Cookie value."""
-            device = homebrowser.devices.sign_in(self.headers.get("Host"), self.headers.get("User-Agent"))
+            device = stealthbox.devices.sign_in(self.headers.get("Host"), self.headers.get("User-Agent"))
             secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
             # Lax, not Strict: a link opened from Messages is a cross-site
             # navigation, and Strict would leave the cookie off it.
@@ -840,9 +840,9 @@ def make_handler(homebrowser, token):
             with no password yet, the page to choose one: it carries a fresh one-time code, which
             another website's form could not read, so it cannot set the password either."""
             if self._device() is None:
-                password_set = homebrowser.password.is_set()
+                password_set = stealthbox.password.is_set()
                 if not password_set and key_setup.local_host(self.headers.get("Host")):
-                    return self._send_html(200, key_setup.password_page(homebrowser.password_codes.issue(), "", False))
+                    return self._send_html(200, key_setup.password_page(stealthbox.password_codes.issue(), "", False))
                 return self._send_html(401, console_auth.sign_in_page(
                     password_set, local_console=f"http://127.0.0.1:{HOST_PORT}/console"))
             with open(CONSOLE_PAGE) as fh:
@@ -854,16 +854,16 @@ def make_handler(homebrowser, token):
         def _sign_in(self):
             form = self._form()
             session = form.get("session", "")
-            if not homebrowser.password.is_set():
+            if not stealthbox.password.is_set():
                 return self._send_html(401, console_auth.sign_in_page(
                     False, local_console=f"http://127.0.0.1:{HOST_PORT}/console"))
             try:
-                homebrowser.password.check(form.get("password", ""))
+                stealthbox.password.check(form.get("password", ""))
             except console_auth.SignInRefused as exc:
-                homebrowser.events.publish("console.sign_in_refused")
+                stealthbox.events.publish("console.sign_in_refused")
                 return self._send_html(401, console_auth.sign_in_page(True, str(exc), session))
             self._to_console(session)
-            homebrowser.events.publish("console.signed_in")
+            stealthbox.events.publish("console.signed_in")
             return None
 
         def _to_console(self, session="", saved=None):
@@ -882,21 +882,21 @@ def make_handler(homebrowser, token):
             form = parse_qs(urlparse(self.path).query) if method == "GET" else None
             form = {name: values[0] for name, values in form.items()} if form is not None else self._form()
             code, session = form.get("code", ""), form.get("session", "")
-            if not homebrowser.password_codes.valid(code):
-                return self._send_html(410, key_setup.expired_page("homebrowser password"))
+            if not stealthbox.password_codes.valid(code):
+                return self._send_html(410, key_setup.expired_page("stealthbox password"))
             if method == "GET":
-                homebrowser.password_progress(code, "opened")
-                return self._send_html(200, key_setup.password_page(code, session, homebrowser.password.is_set()))
+                stealthbox.password_progress(code, "opened")
+                return self._send_html(200, key_setup.password_page(code, session, stealthbox.password.is_set()))
             password = form.get("password", "")
             try:
                 console_auth.check_new(password, form.get("again", ""))
             except ValueError as exc:
-                homebrowser.password_progress(code, "rejected", str(exc))
-                return self._send_html(400, key_setup.password_page(code, session, homebrowser.password.is_set(),
+                stealthbox.password_progress(code, "rejected", str(exc))
+                return self._send_html(400, key_setup.password_page(code, session, stealthbox.password.is_set(),
                                                                     str(exc)))
-            homebrowser.set_password(password)
-            homebrowser.password_progress(code, "saved")
-            homebrowser.password_codes.consume(code)
+            stealthbox.set_password(password)
+            stealthbox.password_progress(code, "saved")
+            stealthbox.password_codes.consume(code)
             return self._to_console(session, saved="password")
 
         def _change_password(self):
@@ -906,15 +906,15 @@ def make_handler(homebrowser, token):
                 return self._send(403, {"error": "change the console password from a signed-in console"})
             body = self._json_body()
             try:
-                homebrowser.password.check(body.get("current", ""))
+                stealthbox.password.check(body.get("current", ""))
             except console_auth.SignInRefused as exc:
-                homebrowser.events.publish("console.sign_in_refused")
+                stealthbox.events.publish("console.sign_in_refused")
                 return self._send(403, {"error": str(exc).replace("Wrong password", "Wrong current password")})
             try:
                 console_auth.check_new(body.get("password", ""), body.get("again", ""))
             except ValueError as exc:
                 return self._send(400, {"error": str(exc)})
-            homebrowser.set_password(body["password"])
+            stealthbox.set_password(body["password"])
             # Every device is signed out with the old password; this one carries on.
             return self._send(200, {"saved": True}, self._device_cookie())
 
@@ -994,20 +994,20 @@ def make_handler(homebrowser, token):
         def _setup(self, method):
             if not key_setup.local_host(self.headers.get("Host")):
                 return self._send(403, {"error": "the setup page only answers on localhost"})
-            password_set = homebrowser.password.is_set()
+            password_set = stealthbox.password.is_set()
             if method == "GET":
                 query = parse_qs(urlparse(self.path).query)
                 code, in_browser = (query.get("code") or [""])[0], bool(query.get("in_browser"))
-                if not homebrowser.setup_codes.valid(code):
-                    return self._send_html(410, key_setup.expired_page("homebrowser key"))
-                homebrowser.key_progress(code, "opened")
+                if not stealthbox.setup_codes.valid(code):
+                    return self._send_html(410, key_setup.expired_page("stealthbox key"))
+                stealthbox.key_progress(code, "opened")
                 return self._send_html(200, key_setup.form_page(code, password_set, in_browser))
             form = self._form()
             code, in_browser = form.get("code", ""), bool(form.get("in_browser"))
             key = form.get("key", "").strip()
             password, again = form.get("password", ""), form.get("again", "")
-            if not homebrowser.setup_codes.valid(code):
-                return self._send_html(410, key_setup.expired_page("homebrowser key"))
+            if not stealthbox.setup_codes.valid(code):
+                return self._send_html(410, key_setup.expired_page("stealthbox key"))
             # Both fields empty keeps the password there is; with none yet, it is required.
             new_password = bool(password or again) or not password_set
             try:
@@ -1015,16 +1015,16 @@ def make_handler(homebrowser, token):
                     console_auth.check_new(password, again)
                 info = key_setup.check_key(key)
             except ValueError as exc:
-                homebrowser.key_progress(code, "rejected", str(exc))
+                stealthbox.key_progress(code, "rejected", str(exc))
                 return self._send_html(400, key_setup.form_page(code, password_set, in_browser, str(exc)))
             key_setup.save_key(key)
             if new_password:
-                homebrowser.set_password(password)
-            homebrowser.key_progress(code, "saved")
-            homebrowser.setup_codes.consume(code)
+                stealthbox.set_password(password)
+            stealthbox.key_progress(code, "saved")
+            stealthbox.setup_codes.consume(code)
             print("openrouter key saved", flush=True)
             if in_browser:
-                # Homebrowser's own tab, seen through the console: the console stays where it is.
+                # Stealthbox's own tab, seen through the console: the console stays where it is.
                 return self._send_html(200, key_setup.saved_page(info, new_password))
             return self._to_console(saved="setup")
 
@@ -1067,42 +1067,42 @@ def make_handler(homebrowser, token):
             if parts == ["v1", "browser", "screenshot"]:
                 return self._send_image(agent.display_thumbnail(PREVIEW_WIDTH))
             if parts == ["v1", "status"]:
-                return self._send(200, homebrowser.status())
+                return self._send(200, stealthbox.status())
             if parts == ["v1", "devices"]:
-                return self._send(200, {"devices": homebrowser.devices.view(self._device())})
+                return self._send(200, {"devices": stealthbox.devices.view(self._device())})
             if parts == ["v1", "sessions"]:
-                return self._send(200, {"sessions": homebrowser.sessions_view()})
+                return self._send(200, {"sessions": stealthbox.sessions_view()})
             if len(parts) == 3 and parts[:2] == ["v1", "sessions"]:
                 try:
-                    session = homebrowser.session(parts[2])
+                    session = stealthbox.session(parts[2])
                 except LookupError as exc:
                     return self._send(404, {"error": str(exc)})
-                return self._send(200, session.view(homebrowser.share, homebrowser.front_tab()))
+                return self._send(200, session.view(stealthbox.share, stealthbox.front_tab()))
             if parts == ["v1", "events"]:
                 return self._stream_events()
             if parts == ["v1", "events", "next"]:
                 return self._next_events()
             if parts == ["v1", "notes"]:
-                return self._send(200, {"sites": homebrowser.notebook.sites(),
-                                        "general": homebrowser.notebook.notes_for("general", 1000),
-                                        "guided_sites": homebrowser.notebook.guided_sites(),
-                                        "guidance": homebrowser.notebook.guidance_for("general")})
+                return self._send(200, {"sites": stealthbox.notebook.sites(),
+                                        "general": stealthbox.notebook.notes_for("general", 1000),
+                                        "guided_sites": stealthbox.notebook.guided_sites(),
+                                        "guidance": stealthbox.notebook.guidance_for("general")})
             if len(parts) == 3 and parts[:2] == ["v1", "notes"]:
                 site = parts[2]
                 try:
                     return self._send(200, {"site": site,
-                                            "guidance": homebrowser.notebook.guidance_for(site),
-                                            "notes": homebrowser.notebook.notes_for(site, 1000),
-                                            "runs": homebrowser.notebook.runs_for(site, 1000)})
+                                            "guidance": stealthbox.notebook.guidance_for(site),
+                                            "notes": stealthbox.notebook.notes_for(site, 1000),
+                                            "runs": stealthbox.notebook.runs_for(site, 1000)})
                 except ValueError as exc:
                     return self._send(400, {"error": str(exc)})
             if len(parts) == 3 and parts[:2] == ["v1", "smoke"]:
-                job = homebrowser.smokes.get(parts[2])
+                job = stealthbox.smokes.get(parts[2])
                 if job is None:
                     return self._send(404, {"error": f"no smoke test {parts[2]}"})
                 return self._send(200, job.view())
             if len(parts) >= 3 and parts[:2] == ["v1", "runs"]:
-                run = homebrowser.runs.get(parts[2])
+                run = stealthbox.runs.get(parts[2])
                 if len(parts) == 3:
                     if run is not None:
                         return self._send(200, run.view(full=True))
@@ -1118,8 +1118,8 @@ def make_handler(homebrowser, token):
             since = self.headers.get("Last-Event-ID") or (query.get("since") or [None])[0]
             if since is not None and not since.isdigit():
                 return self._send(400, {"error": "Last-Event-ID / since must be a non-negative event id"})
-            last = homebrowser.events.last_id() if since is None else int(since)
-            if last > homebrowser.events.last_id():
+            last = stealthbox.events.last_id() if since is None else int(since)
+            if last > stealthbox.events.last_id():
                 # An id this stream never issued (a clock that went back): replay what
                 # is held, which starts with a gap.
                 last = 0
@@ -1129,12 +1129,12 @@ def make_handler(homebrowser, token):
             self.send_header("Cache-Control", "no-store, private")
             self.end_headers()
             self.connection.settimeout(EVENTS_WRITE_TIMEOUT_SECONDS)
-            homebrowser.events.reader(+1)
+            stealthbox.events.reader(+1)
             try:
                 self.wfile.write(b"retry: 3000\n\n")
                 self.wfile.flush()
                 while True:
-                    events, gap = homebrowser.events.after(last, EVENTS_KEEPALIVE_SECONDS)
+                    events, gap = stealthbox.events.after(last, EVENTS_KEEPALIVE_SECONDS)
                     chunks = []
                     if gap:
                         chunks.append(self._event_chunk({"id": events[0]["id"] - 1, "type": "stream.gap",
@@ -1152,17 +1152,17 @@ def make_handler(homebrowser, token):
                 # The reader went away, or stopped reading for the write timeout.
                 return None
             finally:
-                homebrowser.events.reader(-1)
+                stealthbox.events.reader(-1)
 
         def _next_events(self):
             """The event stream as a long poll, for the console through the share tunnel:
             Cloudflare quick tunnels hold a Server-Sent Events response until it ends."""
             since = (parse_qs(urlparse(self.path).query).get("since") or [None])[0]
             if since is None:
-                return self._send(200, {"events": [], "gap": False, "last_id": homebrowser.events.last_id()})
+                return self._send(200, {"events": [], "gap": False, "last_id": stealthbox.events.last_id()})
             if not since.isdigit():
                 return self._send(400, {"error": "since must be a non-negative event id"})
-            events, gap = homebrowser.events.after(int(since), EVENTS_POLL_SECONDS)
+            events, gap = stealthbox.events.after(int(since), EVENTS_POLL_SECONDS)
             return self._send(200, {"events": events, "gap": gap,
                                     "last_id": events[-1]["id"] if events else int(since)})
 
@@ -1222,29 +1222,29 @@ def make_handler(homebrowser, token):
                 return None
             if parts == ["v1", "setup-link"]:
                 body = self._json_body()
-                return self._send(200, homebrowser.setup_link(bool(body.get("in_browser"))))
+                return self._send(200, stealthbox.setup_link(bool(body.get("in_browser"))))
             if parts == ["v1", "share"]:
                 try:
-                    return self._send(200, homebrowser.share_link())
+                    return self._send(200, stealthbox.share_link())
                 except RuntimeError as exc:
                     return self._send(502, {"error": str(exc)})
             if parts == ["v1", "unshare"]:
-                return self._send(200, {"stopped": homebrowser.unshare()})
+                return self._send(200, {"stopped": stealthbox.unshare()})
             if parts == ["v1", "password-link"]:
                 shared = bool(self._json_body().get("share"))
                 try:
-                    base = homebrowser.share.wait() if shared else f"http://127.0.0.1:{HOST_PORT}"
+                    base = stealthbox.share.wait() if shared else f"http://127.0.0.1:{HOST_PORT}"
                 except RuntimeError as exc:
                     return self._send(502, {"error": str(exc)})
-                return self._send(200, {"password_url": homebrowser.password_link(base), "shared": shared,
-                                        "console_password": homebrowser.password.is_set(),
+                return self._send(200, {"password_url": stealthbox.password_link(base), "shared": shared,
+                                        "console_password": stealthbox.password.is_set(),
                                         "expires_in_seconds": key_setup.CODE_SECONDS})
             if parts == ["v1", "password"]:
                 return self._change_password()
             if parts == ["v1", "devices", "sign-out-everywhere"]:
-                return self._send(200, {"signed_out": homebrowser.devices.sign_out()})
+                return self._send(200, {"signed_out": stealthbox.devices.sign_out()})
             if len(parts) == 4 and parts[:2] == ["v1", "devices"] and parts[3] == "sign-out":
-                signed_out = homebrowser.devices.sign_out(device_id=parts[2])
+                signed_out = stealthbox.devices.sign_out(device_id=parts[2])
                 if not signed_out:
                     return self._send(404, {"error": f"no device {parts[2]}"})
                 return self._send(200, {"signed_out": signed_out})
@@ -1256,9 +1256,9 @@ def make_handler(homebrowser, token):
                 sites = sites or smoke.default_sites()
                 if not sites:
                     return self._send(400, {"error": "name the sites to visit, e.g. "
-                                                     "`homebrowser smoke example.com` (no smoke-sites.txt "
+                                                     "`stealthbox smoke example.com` (no smoke-sites.txt "
                                                      "in the data folder)"})
-                job = homebrowser.submit_smoke(sites)
+                job = stealthbox.submit_smoke(sites)
                 if body.get("wait", True) is False:
                     return self._send(202, job.view())
                 job.done.wait()
@@ -1273,7 +1273,7 @@ def make_handler(homebrowser, token):
                     return self._send(400, {"error": "message is required"})
                 max_stuck_steps = min(int(body.get("max_stuck_steps") or DEFAULT_MAX_STUCK_STEPS), MAX_STUCK_STEPS_LIMIT)
                 try:
-                    run = homebrowser.submit(message, body.get("session"), max_stuck_steps, body.get("tab"))
+                    run = stealthbox.submit(message, body.get("session"), max_stuck_steps, body.get("tab"))
                 except ValueError as exc:
                     return self._send(400, {"error": str(exc)})
                 except PermissionError as exc:
@@ -1287,14 +1287,14 @@ def make_handler(homebrowser, token):
                 run.done.wait()
                 return self._send(200, run.view())
             if len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] in ("cancel", "pause", "resume"):
-                run = homebrowser.runs.get(parts[2])
+                run = stealthbox.runs.get(parts[2])
                 if run is None:
                     return self._send(404, {"error": f"no run {parts[2]}"})
                 if parts[3] == "cancel":
-                    homebrowser.cancel(run)
+                    stealthbox.cancel(run)
                     return self._send(200, {"run": run.id, "cancelling": run.status in ("queued", "running")})
                 try:
-                    homebrowser.pause(run, parts[3] == "pause")
+                    stealthbox.pause(run, parts[3] == "pause")
                 except RuntimeError as exc:
                     return self._send(409, {"error": str(exc)})
                 return self._send(200, {"run": run.id, "paused": run.paused})
@@ -1304,8 +1304,8 @@ def make_handler(homebrowser, token):
                 if not text:
                     return self._send(400, {"error": "url is required"})
                 try:
-                    session = homebrowser.session(body["session"]) if body.get("session") else None
-                    url = homebrowser.navigate(text, session)
+                    session = stealthbox.session(body["session"]) if body.get("session") else None
+                    url = stealthbox.navigate(text, session)
                 except LookupError as exc:
                     return self._send(404, {"error": str(exc)})
                 except RuntimeError as exc:
@@ -1313,11 +1313,11 @@ def make_handler(homebrowser, token):
                 return self._send(200, {"url": url})
             if len(parts) == 4 and parts[:2] == ["v1", "sessions"] and parts[3] in ("focus", "close"):
                 try:
-                    session = homebrowser.session(parts[2])
+                    session = stealthbox.session(parts[2])
                     if parts[3] == "focus":
-                        homebrowser.focus(session)
+                        stealthbox.focus(session)
                     else:
-                        homebrowser.close(session)
+                        stealthbox.close(session)
                 except LookupError as exc:
                     return self._send(404, {"error": str(exc)})
                 except RuntimeError as exc:
@@ -1343,7 +1343,7 @@ def drop_privileges():
     owner = os.stat(DATA_DIR)
     if os.getuid() != 0 or owner.st_uid == 0:
         return
-    home = "/tmp/homebrowser-api"
+    home = "/tmp/stealthbox-api"
     os.makedirs(home, exist_ok=True)
     os.chown(home, owner.st_uid, owner.st_gid)
     os.setgroups([])
@@ -1357,10 +1357,10 @@ def main():
     drop_privileges()
     os.makedirs(os.path.join(DATA_DIR, "runs"), exist_ok=True)
     token = load_token()
-    homebrowser = Homebrowser()
-    threading.Thread(target=homebrowser.work, name="browser-worker", daemon=True).start()
-    server = Server(("0.0.0.0", PORT), make_handler(homebrowser, token))
-    print(f"homebrowser api on :{PORT}, model {agent.DEFAULT_MODEL}, data {DATA_DIR}", flush=True)
+    stealthbox = Stealthbox()
+    threading.Thread(target=stealthbox.work, name="browser-worker", daemon=True).start()
+    server = Server(("0.0.0.0", PORT), make_handler(stealthbox, token))
+    print(f"stealthbox api on :{PORT}, model {agent.DEFAULT_MODEL}, data {DATA_DIR}", flush=True)
     server.serve_forever()
 
 

@@ -8,7 +8,7 @@
 
 2. Patchright intercepts every request of every page (Fetch.enable on "*") so it
    can inject init scripts into documents, even when no route or init script is
-   set. Homebrowser sets neither, and the interception broke some framework pages:
+   set. Stealthbox sets neither, and the interception broke some framework pages:
    a store's search results rendered on 2 loads in 5 with it, 5 in 5 without it
    (and with stock Playwright). It is now on only when a route needs it, as in
    stock Playwright. Patchright still never sends Runtime.enable.

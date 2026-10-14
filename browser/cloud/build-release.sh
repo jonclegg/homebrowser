@@ -36,7 +36,7 @@ for type in "${TYPES[@]}"; do
       --key-name "$KEY" --security-group-ids "$SECURITY_GROUP" --subnet-id "$SUBNET" \
       --instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}' \
       --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":60,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-      --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=homebrowser-core-build}]' \
+      --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=stealthbox-core-build}]' \
       --query 'Instances[0].InstanceId' --output text 2>/dev/null)"; then
     echo "== $type $instance"
     break
@@ -73,7 +73,7 @@ rsync -a -e "${ssh_to[*]}" "ubuntu@$ip:/work/fury/core/dist/fury-core-linux-*.ta
 "${ssh_to[@]}" "ubuntu@$ip" 'sudo umount /work'
 aws ec2 detach-volume --region "$REGION" --volume-id "$VOLUME" >/dev/null
 
-gh release create "$tag" --repo jonclegg/homebrowser --title "Browser core $tag" \
+gh release create "$tag" --repo jonclegg/stealthbox --title "Browser core $tag" \
   --notes "Fury core for Linux (x64, arm64) from browser/ at $(git -C "$here" rev-parse --short HEAD)." \
   "$here/dist/fury-core-linux-x64.tar.xz" "$here/dist/fury-core-linux-arm64.tar.xz"
 echo "== published $tag; set FURY_CORE_TAG and these checksums in image/Dockerfile:"

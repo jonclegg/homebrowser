@@ -166,12 +166,12 @@ class TestParseCliArgs:
         assert config["idle_timeout"] == 0.0
 
     def test_idle_timeout_env_default(self, monkeypatch):
-        monkeypatch.setenv("HOMEBROWSER_IDLE_TIMEOUT", "2.5")
+        monkeypatch.setenv("STEALTHBOX_IDLE_TIMEOUT", "2.5")
         config, _ = parse_cli_args([])
         assert config["idle_timeout"] == 2.5
 
     def test_idle_timeout_cli_overrides_env(self, monkeypatch):
-        monkeypatch.setenv("HOMEBROWSER_IDLE_TIMEOUT", "2.5")
+        monkeypatch.setenv("STEALTHBOX_IDLE_TIMEOUT", "2.5")
         config, _ = parse_cli_args(["--idle-timeout=9"])
         assert config["idle_timeout"] == 9.0
 
@@ -186,7 +186,7 @@ class TestParseCliArgs:
     @patch("os.path.exists", return_value=False)
     def test_default_data_dir_bare_metal(self, _mock):
         result = _default_data_dir()
-        assert result.endswith(".homebrowser/cdp-server")
+        assert result.endswith(".stealthbox/cdp-server")
 
 
 # ---------------------------------------------------------------------------

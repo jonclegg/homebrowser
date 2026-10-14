@@ -1,4 +1,4 @@
-# Homebrowser's image, built from the repository root by `homebrowser start`
+# Stealthbox's image, built from the repository root by `stealthbox start`
 # (docker-compose.yml). Everything comes from this repository except the browser
 # core, which is prebuilt (browser/cloud) and downloaded from this repository's
 # private releases.
@@ -22,9 +22,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/*
 
 # cdp-server's launcher package: browser arguments, proxies, GeoIP.
-COPY serve/pyproject.toml /opt/homebrowser/serve/pyproject.toml
-COPY serve/homebrowser_launcher /opt/homebrowser/serve/homebrowser_launcher
-RUN pip install --no-cache-dir /opt/homebrowser/serve
+COPY serve/pyproject.toml /opt/stealthbox/serve/pyproject.toml
+COPY serve/stealthbox_launcher /opt/stealthbox/serve/stealthbox_launcher
+RUN pip install --no-cache-dir /opt/stealthbox/serve
 
 # Patchright: Playwright's API without the Runtime.enable call that some bot-check
 # vendors detect. Under stock Playwright, such a page that has to issue a new
@@ -36,7 +36,7 @@ RUN python3 /tmp/patch-patchright.py && rm /tmp/patch-patchright.py
 # The agent's screenshots come from the X display (mss), scaled to CSS pixels (Pillow).
 RUN pip install --no-cache-dir mss==10.2.0 pillow==12.3.0
 
-# `homebrowser share`: a Cloudflare quick tunnel to the console, run by the chat API
+# `stealthbox share`: a Cloudflare quick tunnel to the console, run by the chat API
 # so a run that needs the user can hand them a link. The host needs nothing for it.
 ARG TARGETARCH
 RUN curl -fsSL --retry 3 -o /usr/local/bin/cloudflared \
@@ -46,13 +46,13 @@ RUN curl -fsSL --retry 3 -o /usr/local/bin/cloudflared \
 
 # The browser: Fury's patched Chromium (browser/), built for Linux by
 # browser/cloud/build-release.sh. cdp-server runs the pool, GeoIP and native
-# input; HOMEBROWSER_BINARY_PATH makes it launch launch-browser, which hands the
+# input; STEALTHBOX_BINARY_PATH makes it launch launch-browser, which hands the
 # core a persona config. The release is private, so the core comes through the
 # GitHub API with a token passed as a build secret, which never lands in the image:
 #   docker build --secret id=github_token,env=GITHUB_TOKEN ...
 # FURY_CORE_URL, when set, takes the tarballs from there instead (a local
 # `python3 -m http.server` over browser/dist, for unreleased cores).
-ARG FURY_CORE_REPO=jonclegg/homebrowser
+ARG FURY_CORE_REPO=jonclegg/stealthbox
 ARG FURY_CORE_TAG=core-155.0.8059.12-linux.1
 ARG FURY_CORE_URL=
 ARG FURY_CORE_SHA256_AMD64=955a999a40e15d34f8637b3ded335bee934fd6c9485735b4bf1c8380ef739609
@@ -80,17 +80,17 @@ RUN --mount=type=secret,id=github_token \
     && /opt/fury/chrome --version
 COPY browser/personas/personas.json /opt/fury/personas.json
 COPY browser/personas/mac-measured.json /opt/fury/mac-measured.json
-COPY image/mac-fonts.conf /opt/homebrowser/mac-fonts.conf
+COPY image/mac-fonts.conf /opt/stealthbox/mac-fonts.conf
 COPY image/launch-browser /usr/local/bin/launch-browser
 COPY serve/cdp-server /usr/local/bin/cdp-server
 COPY serve/entrypoint.sh /entrypoint.sh
-# HOMEBROWSER_VERSION is what cdp-server gates its window settling on. Settling
+# STEALTHBOX_VERSION is what cdp-server gates its window settling on. Settling
 # exists for older builds that report an incoherent window; with it on, Fury's
 # Mac persona (a 33 px menu bar the X11 window cannot know about) fails every
 # size and the launch is killed. launch-browser places the window on the
 # persona's available area instead.
-ENV HOMEBROWSER_BINARY_PATH=/usr/local/bin/launch-browser \
-    HOMEBROWSER_VERSION=155.0.8059.12 \
+ENV STEALTHBOX_BINARY_PATH=/usr/local/bin/launch-browser \
+    STEALTHBOX_VERSION=155.0.8059.12 \
     DISPLAY=:99
 
 COPY image/index.html /usr/share/novnc/index.html
@@ -99,24 +99,24 @@ COPY image/index.html /usr/share/novnc/index.html
 # display:none, because noVNC's CSS overrides the hidden attribute on inputs.
 RUN sed -i 's#<textarea id="noVNC_clipboard_text" rows=5></textarea>#&\n                <input id="noVNC_clipboard_clear_button" type="button" style="display:none">#' /usr/share/novnc/vnc.html \
     && grep -q 'id="noVNC_clipboard_clear_button"' /usr/share/novnc/vnc.html
-COPY image/homebrowser-serve.sh /usr/local/bin/homebrowser-serve
-# `docker exec homebrowser homebrowser chat|key|smoke|share|status ...` works from any host
+COPY image/stealthbox-serve.sh /usr/local/bin/stealthbox-serve
+# `docker exec stealthbox stealthbox chat|key|smoke|share|status ...` works from any host
 # shell (macOS, Linux, PowerShell), with nothing installed on the host.
-COPY image/homebrowser-client.sh /usr/local/bin/homebrowser
-RUN chmod +x /usr/local/bin/homebrowser-serve /usr/local/bin/homebrowser /usr/local/bin/launch-browser \
+COPY image/stealthbox-client.sh /usr/local/bin/stealthbox
+RUN chmod +x /usr/local/bin/stealthbox-serve /usr/local/bin/stealthbox /usr/local/bin/launch-browser \
     /usr/local/bin/cdp-server /entrypoint.sh
 
 # The chat API and its agent: Patchright (above) and the standard library.
-COPY agent/*.py agent/console.html /opt/homebrowser/agent/
-COPY agent/guidance /opt/homebrowser/agent/guidance
-COPY examples/humanize.py examples/bing_first.py /opt/homebrowser/examples/
-ENV HOMEBROWSER_EXAMPLES=/opt/homebrowser/examples \
-    HOMEBROWSER_DATA=/data
-LABEL org.opencontainers.image.source=https://github.com/jonclegg/homebrowser \
-      org.opencontainers.image.description="Homebrowser: a stealth browser for AI agents" \
+COPY agent/*.py agent/console.html /opt/stealthbox/agent/
+COPY agent/guidance /opt/stealthbox/agent/guidance
+COPY examples/humanize.py examples/bing_first.py /opt/stealthbox/examples/
+ENV STEALTHBOX_EXAMPLES=/opt/stealthbox/examples \
+    STEALTHBOX_DATA=/data
+LABEL org.opencontainers.image.source=https://github.com/jonclegg/stealthbox \
+      org.opencontainers.image.description="Stealthbox: a stealth browser for AI agents" \
       org.opencontainers.image.licenses=MIT
 
 EXPOSE 9222 6080 8423
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["homebrowser-serve"]
+CMD ["stealthbox-serve"]

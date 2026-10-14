@@ -1,10 +1,10 @@
-"""Core browser launch functions for homebrowser_launcher.
+"""Core browser launch functions for stealthbox_launcher.
 
 Provides launch() and launch_async() — thin wrappers around Playwright
 that use our patched stealth Chromium binary instead of stock Chromium.
 
 Usage:
-    from homebrowser_launcher import launch
+    from stealthbox_launcher import launch
 
     browser = launch()
     page = browser.new_page()
@@ -19,7 +19,7 @@ from typing import TypedDict
 from urllib.parse import quote, unquote, urlparse, urlunparse
 from .config import BINARY_DEFAULT_LOCALE, HARDWARE_PROFILE_FLAGS, HARDWARE_PROFILES, get_default_stealth_args, hardware_profile_args
 
-logger = logging.getLogger("homebrowser_launcher")
+logger = logging.getLogger("stealthbox_launcher")
 
 class _ProxySettingsRequired(TypedDict):
     server: str

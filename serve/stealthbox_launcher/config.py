@@ -1,4 +1,4 @@
-"""Stealth configuration and platform detection for homebrowser_launcher."""
+"""Stealth configuration and platform detection for stealthbox_launcher."""
 
 from __future__ import annotations
 import hashlib
@@ -100,11 +100,11 @@ _VERSION_PIN_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){3,4}$")
 def normalize_requested_version(version: str | None = None) -> str | None:
     """Return an explicit Chromium version pin from arg/env, or None.
 
-    The explicit argument wins over HOMEBROWSER_VERSION. Only numeric dotted
+    The explicit argument wins over STEALTHBOX_VERSION. Only numeric dotted
     versions are accepted because the value is interpolated into cache paths and
     download URLs.
     """
-    raw = version if version is not None else os.environ.get("HOMEBROWSER_VERSION")
+    raw = version if version is not None else os.environ.get("STEALTHBOX_VERSION")
     if raw is None:
         return None
     normalized = raw.strip()
@@ -123,13 +123,13 @@ def normalize_requested_version(version: str | None = None) -> str | None:
 def get_cache_dir() -> Path:
     """Return the cache directory for downloaded binaries.
 
-    Override with HOMEBROWSER_CACHE_DIR env var.
-    Default: ~/.homebrowser/
+    Override with STEALTHBOX_CACHE_DIR env var.
+    Default: ~/.stealthbox/
     """
-    custom = os.environ.get("HOMEBROWSER_CACHE_DIR")
+    custom = os.environ.get("STEALTHBOX_CACHE_DIR")
     if custom:
         return Path(custom)
-    return Path.home() / ".homebrowser"
+    return Path.home() / ".stealthbox"
 
 def _version_tuple(v: str) -> tuple[int, ...]:
     """Parse '145.0.7718.0' into (145, 0, 7718, 0) for comparison."""
@@ -153,8 +153,8 @@ def binary_supports_headless_no_viewport(browser_version: str | None = None) -> 
     """Whether headless can launch with ``no_viewport`` on the binary.
 
     Only binaries at or above ``HEADLESS_NO_VIEWPORT_MIN_VERSION`` qualify. The
-    binary is always a local one (``HOMEBROWSER_BINARY_PATH``), so the version is
-    the declared one (``browser_version`` or ``HOMEBROWSER_VERSION``); with none
+    binary is always a local one (``STEALTHBOX_BINARY_PATH``), so the version is
+    the declared one (``browser_version`` or ``STEALTHBOX_VERSION``); with none
     declared it stays on the safe path.
     """
     if HEADLESS_NO_VIEWPORT_MIN_VERSION is None:

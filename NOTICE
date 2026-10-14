@@ -1,7 +1,7 @@
-Homebrowser
+Stealthbox
 ===========
 
-Homebrowser's own code (agent/, examples/, image/, tests/, skills/, the scripts
+Stealthbox's own code (agent/, examples/, image/, tests/, skills/, the scripts
 and Compose files) is licensed under the MIT License (see LICENSE). It began as
 Cloakroom, an earlier project by the same author.
 
@@ -22,11 +22,11 @@ browser/
     (shared-rs/src/catalogue.rs, AGPL-3.0-or-later) by its `catalogue` example.
 
 serve/
-  cdp-server and its homebrowser_launcher package are adapted from the MIT
+  cdp-server and its stealthbox_launcher package are adapted from the MIT
   licensed CloakBrowser wrapper by CloakHQ (https://github.com/CloakHQ/CloakBrowser,
   through the fork https://github.com/jonclegg/CloakBrowser at 8dcc06f): cloakserve,
   renamed, and the parts of the cloakbrowser package it uses. See serve/LICENSE.
-  Homebrowser does not contain or download CloakHQ's proprietary binary.
+  Stealthbox does not contain or download CloakHQ's proprietary binary.
 
 Patchright (https://github.com/Kaliiiiiiiiii-Vinyzu/patchright, Apache-2.0) is
 installed from PyPI at build time; image/patch-patchright.py changes two lines of
@@ -39,5 +39,5 @@ to its vnc.html (see image/Dockerfile) so browsers holding a cached older noVNC
 script still load. noVNC's vnc.html is BSD-2-Clause per its file header; the
 rest of noVNC is MPL-2.0.
 
-Homebrowser is an independent project and is not affiliated with or endorsed by
+Stealthbox is an independent project and is not affiliated with or endorsed by
 CloakHQ or the Fury authors.

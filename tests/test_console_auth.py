@@ -1,6 +1,6 @@
 """Unit tests for the console password and signed-in devices (agent/console_auth.py).
 
-No running Homebrowser needed. The strength test also runs the setup page's own
+No running Stealthbox needed. The strength test also runs the setup page's own
 JavaScript in Node, so the meter and the server never disagree.
 
     pytest tests/test_console_auth.py
@@ -20,14 +20,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import console_auth  # noqa: E402
 
-SAMPLES = ["", "short", "abcdefghij", "aaaaaaaaaaaa", "MyPassword123", "homebrowser-2026!", "sunshinees7",
+SAMPLES = ["", "short", "abcdefghij", "aaaaaaaaaaaa", "MyPassword123", "stealthbox-2026!", "sunshinees7",
            "sunshinee", "Summer2024!", "correct horse battery staple", "Tr0ub4dor&3xyz", "ñandú-über-straße"]
 
 
 def test_strength_refuses_short_and_guessable_passwords():
     assert console_auth.strength("short")[0] == 0
     assert console_auth.strength("password1234")[0] == 0
-    assert console_auth.strength("homebrowser-2026!")[0] == 0
+    assert console_auth.strength("stealthbox-2026!")[0] == 0
     assert console_auth.strength("aaaaaaaaaaaa")[0] == 0
     assert console_auth.strength("sunshinees7") == (2, "Fair")
     assert console_auth.strength("correct horse battery staple")[0] == 4

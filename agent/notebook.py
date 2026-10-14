@@ -1,16 +1,16 @@
-"""Homebrowser's notebook: what it knows about each site.
+"""Stealthbox's notebook: what it knows about each site.
 
-General guidance ships with Homebrowser in agent/guidance/general.md: how bot
+General guidance ships with Stealthbox in agent/guidance/general.md: how bot
 checks look and what beats them. Guidance for single sites does not ship; a site
 pack installed separately puts it in <data>/guidance/sites/<site>.md. Both are
-read-only to Homebrowser.
+read-only to Stealthbox.
 
-What Homebrowser learns itself is kept between runs, two kinds of entry per site,
+What Stealthbox learns itself is kept between runs, two kinds of entry per site,
 under <data>/notes/sites/:
 
 * <site>.md     lessons the model wrote itself ("example.com: the photo gallery
                 opens from the main image; Esc closes it").
-* <site>.jsonl  the run log, written by Homebrowser after every run that touched
+* <site>.jsonl  the run log, written by Stealthbox after every run that touched
                 the site: the message, outcome, bot checks seen, steps, cost.
 
 Lessons that are not about one site go to <data>/notes/general.md. Lookup is by
@@ -107,7 +107,7 @@ class Notebook:
         parts = []
         guidance = self.guidance_for("general")
         if guidance:
-            parts.append(f"Guidance that ships with Homebrowser:\n{guidance}")
+            parts.append(f"Guidance that ships with Stealthbox:\n{guidance}")
         general = self.notes_for("general", GENERAL_SHOWN)
         if general:
             parts.append(f"Your general notes:\n{general}")

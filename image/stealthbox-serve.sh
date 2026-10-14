@@ -4,7 +4,7 @@ set -euo pipefail
 
 DATA_DIR=/tmp/cdp-server
 PROFILE_DIR=/profile/default
-PROFILE_KEY="${HOMEBROWSER_FINGERPRINT_SEED:-__default__}"
+PROFILE_KEY="${STEALTHBOX_FINGERPRINT_SEED:-__default__}"
 
 apply_container_timezone() {
   [ -n "${TZ:-}" ] || return 0
@@ -33,26 +33,26 @@ websockify --web /usr/share/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 
 
 # The chat API. It connects to the browser over loopback on first use, so it can
 # start before Chrome is up. The health check covers it, so a crash shows.
-python -u /opt/homebrowser/agent/server.py &
+python -u /opt/stealthbox/agent/server.py &
 
 # --geoip sets the browser's timezone and locale from the egress IP (the proxy's,
 # when one is set), so the clock always matches where the traffic comes from.
 args=(--headless=false --geoip --data-dir="$DATA_DIR")
-if [ -n "${HOMEBROWSER_FINGERPRINT_SEED:-}" ]; then
-  args+=(--fingerprint="$HOMEBROWSER_FINGERPRINT_SEED")
+if [ -n "${STEALTHBOX_FINGERPRINT_SEED:-}" ]; then
+  args+=(--fingerprint="$STEALTHBOX_FINGERPRINT_SEED")
 fi
-if [ "${HOMEBROWSER_PERSONA:-windows}" = "macos" ]; then
+if [ "${STEALTHBOX_PERSONA:-windows}" = "macos" ]; then
   # Host fonts are mounted under /usr/local/share/fonts by docker-compose.mac.yml.
   # Generic families resolve to the Mac's choices (mac-fonts.conf); system-ui is
   # Chrome's UI font on Linux, which it takes from GTK.
-  cp /opt/homebrowser/mac-fonts.conf /etc/fonts/local.conf
+  cp /opt/stealthbox/mac-fonts.conf /etc/fonts/local.conf
   mkdir -p /root/.config/gtk-3.0
   printf '[Settings]\ngtk-font-name=.SF NS 13\n' > /root/.config/gtk-3.0/settings.ini
   fc-cache -f >/dev/null
   args+=(--fingerprint-platform=macos --force-device-scale-factor=2)
 fi
-if [ -n "${HOMEBROWSER_PROXY:-}" ]; then
-  args+=(--proxy-server="$HOMEBROWSER_PROXY")
+if [ -n "${STEALTHBOX_PROXY:-}" ]; then
+  args+=(--proxy-server="$STEALTHBOX_PROXY")
 fi
 
 exec cdp-server "${args[@]}" "$@"

@@ -1,8 +1,8 @@
-name: homebrowser
+name: stealthbox
 
 services:
-  # Built on this computer by `homebrowser start`; nothing is published.
-  homebrowser:
+  # Built on this computer by `stealthbox start`; nothing is published.
+  stealthbox:
     build:
       context: .
       dockerfile: image/Dockerfile
@@ -11,12 +11,12 @@ services:
       args:
         - FURY_CORE_URL
       # The core release is private: GITHUB_TOKEN (start.sh takes it from
-      # `gh auth token`) must be able to read jonclegg/homebrowser.
+      # `gh auth token`) must be able to read jonclegg/stealthbox.
       secrets:
         - github_token
-    image: ${HOMEBROWSER_IMAGE:-homebrowser:local}
-    container_name: homebrowser
-    hostname: homebrowser
+    image: ${STEALTHBOX_IMAGE:-stealthbox:local}
+    container_name: stealthbox
+    hostname: stealthbox
     restart: unless-stopped
     # An init as PID 1 to reap orphans. Chrome's crashpad handlers outlive their
     # browsers, and nothing else in the container waits on them: measured 455
@@ -27,23 +27,23 @@ services:
         required: false
     environment:
       TZ: ${TZ:-America/Chicago}
-      HOMEBROWSER_HOST_DATA_DIR: ${HOMEBROWSER_DATA_DIR:-${HOME}/.homebrowser/data}
-      HOMEBROWSER_API_HOST_PORT: ${HOMEBROWSER_API_PORT:-8423}
-      HOMEBROWSER_VIEWER_HOST_PORT: ${HOMEBROWSER_VIEWER_PORT:-6080}
+      STEALTHBOX_HOST_DATA_DIR: ${STEALTHBOX_DATA_DIR:-${HOME}/.stealthbox/data}
+      STEALTHBOX_API_HOST_PORT: ${STEALTHBOX_API_PORT:-8423}
+      STEALTHBOX_VIEWER_HOST_PORT: ${STEALTHBOX_VIEWER_PORT:-6080}
     ports:
       # Localhost only. Anyone who can reach these ports controls the browser.
-      - "127.0.0.1:${HOMEBROWSER_CDP_PORT:-9222}:9222"
-      - "127.0.0.1:${HOMEBROWSER_VIEWER_PORT:-6080}:6080"
-      - "127.0.0.1:${HOMEBROWSER_API_PORT:-8423}:8423"
+      - "127.0.0.1:${STEALTHBOX_CDP_PORT:-9222}:9222"
+      - "127.0.0.1:${STEALTHBOX_VIEWER_PORT:-6080}:6080"
+      - "127.0.0.1:${STEALTHBOX_API_PORT:-8423}:8423"
     # Chromium crashes tabs with Docker's default 64 MB /dev/shm.
     shm_size: 2gb
     volumes:
       - profile:/profile
       # The GeoIP database, downloaded on first start.
-      - cache:/root/.homebrowser
+      - cache:/root/.stealthbox
       # Notes, run logs, saved photos, the API token. A host folder, so callers
       # can open the files directly.
-      - ${HOMEBROWSER_DATA_DIR:-${HOME}/.homebrowser/data}:/data
+      - ${STEALTHBOX_DATA_DIR:-${HOME}/.stealthbox/data}:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:9222/json/version && curl -fsS -o /dev/null http://localhost:8423/v1/health"]
       interval: 30s
@@ -52,24 +52,24 @@ services:
       # The first start downloads the GeoIP database.
       start_period: 300s
 
-  # The console's share link (`homebrowser share`): a Cloudflare quick tunnel in a
-  # container of its own, so restarting or updating Homebrowser keeps its address and
-  # every device signed in through it. `homebrowser unshare` stops it.
+  # The console's share link (`stealthbox share`): a Cloudflare quick tunnel in a
+  # container of its own, so restarting or updating Stealthbox keeps its address and
+  # every device signed in through it. `stealthbox unshare` stops it.
   share:
-    image: ${HOMEBROWSER_IMAGE:-homebrowser:local}
+    image: ${STEALTHBOX_IMAGE:-stealthbox:local}
     profiles: ["share"]
     entrypoint: ["cloudflared"]
-    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:20241", "--url", "http://homebrowser:8423"]
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:20241", "--url", "http://stealthbox:8423"]
     restart: unless-stopped
 
   hello:
-    image: ${HOMEBROWSER_IMAGE:-homebrowser:local}
+    image: ${STEALTHBOX_IMAGE:-stealthbox:local}
     profiles: ["examples"]
     depends_on:
-      homebrowser:
+      stealthbox:
         condition: service_healthy
     environment:
-      CDP_URL: http://homebrowser:9222
+      CDP_URL: http://stealthbox:9222
     volumes:
       - ./examples:/examples:ro
     entrypoint: ["python", "-u", "/examples/hello.py"]

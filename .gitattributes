@@ -1,7 +1,7 @@
 # Scripts run inside Linux containers or macOS shells; CRLF breaks them.
 *.sh text eol=lf
 *.py text eol=lf
-homebrowser text eol=lf
+stealthbox text eol=lf
 image/* text eol=lf
 docker-compose.yml text eol=lf
 .env.example text eol=lf

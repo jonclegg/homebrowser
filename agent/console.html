@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<title>Homebrowser</title>
+<title>Stealthbox</title>
 <style>
 /* One screen, nothing scrolls but the conversation. Sessions on the left, the chosen
    session's live browser in the middle with what it is doing right now under it, and
@@ -121,7 +121,7 @@ body.expanded .viewport { flex: 1 1 auto; height: auto; }
 /* the field a touch screen types into; its keys go to the live browser */
 .viewport > .keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; }
 
-/* what Homebrowser is doing right now, attached to the screen it is doing it on */
+/* what Stealthbox is doing right now, attached to the screen it is doing it on */
 .now { flex: none; display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--raised); font-size: 13px; }
 .now .label { font-weight: 600; white-space: nowrap; }
 .now .text { flex: 1; min-width: 0; color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -288,7 +288,7 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
   </button>
   <div class="brand">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a2.5 2.5 0 0 1 2.5 2.5c0 1.4-1.2 2-2.5 3.2V10"/><path d="M12 10 3 17.5h18L12 10Z"/></svg>
-    Homebrowser
+    Stealthbox
   </div>
   <div class="state">
     <span data-testid="browser-state"><span class="dot" id="browser-dot"></span><span id="browser-text">Connecting…</span></span>
@@ -311,7 +311,7 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
       </div>
       <p class="saved-note" id="password-saved" hidden role="status">Password changed. Every other device is signed out.</p>
       <form id="password-form" hidden data-testid="password-form">
-        <input type="text" name="username" value="homebrowser" autocomplete="username" hidden>
+        <input type="text" name="username" value="stealthbox" autocomplete="username" hidden>
         <label for="current-password">Current password</label>
         <input id="current-password" name="current" type="password" autocomplete="current-password" required>
         <!-- password fields -->
@@ -335,7 +335,7 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
 <div class="app empty" id="app">
   <nav class="rail" aria-label="Sessions">
     <div class="ask">
-      <label for="new-message">Ask Homebrowser to do something</label>
+      <label for="new-message">Ask Stealthbox to do something</label>
       <form id="new-form">
         <input id="new-message" type="text" autocomplete="off" placeholder="e.g. check my order status on example.com" data-testid="new-message">
         <button class="btn primary" type="submit" data-testid="new-start">Start</button>
@@ -352,8 +352,8 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
     <div class="error" id="s-error" hidden role="alert" data-testid="error"></div>
     <div class="welcome" id="welcome">
       <h1>Nothing to show yet</h1>
-      <p>Sessions appear here when you or your agent ask Homebrowser to do something. Each one gets its own tab in the browser.</p>
-      <button class="btn primary" type="button" data-open-drawer>Ask Homebrowser to do something</button>
+      <p>Sessions appear here when you or your agent ask Stealthbox to do something. Each one gets its own tab in the browser.</p>
+      <button class="btn primary" type="button" data-open-drawer>Ask Stealthbox to do something</button>
     </div>
 
     <div class="session" id="session" hidden>
@@ -392,7 +392,7 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
             <button class="btn small" type="button" data-act="copy" data-testid="copy-link">Copy link</button>
           </div>
         </div>
-        <div class="banner mine" id="s-paused" hidden data-testid="paused-note">You have the mouse: click and type right here. Homebrowser holds after its current step and picks up from what is on screen when you hand back.</div>
+        <div class="banner mine" id="s-paused" hidden data-testid="paused-note">You have the mouse: click and type right here. Stealthbox holds after its current step and picks up from what is on screen when you hand back.</div>
         <div class="banner still" id="s-still-bar" hidden>
           <span id="s-still-text"></span>
           <button class="btn small" type="button" data-act="focus" id="s-focus" data-testid="show-live">Show it live</button>
@@ -420,11 +420,11 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
     </div>
     <form class="compose" id="s-compose">
       <div class="needs-row" id="s-compose-needs" hidden>
-        <span>Done in the page? Homebrowser carries on from what is on screen.</span>
+        <span>Done in the page? Stealthbox carries on from what is on screen.</span>
         <button class="btn amber small" type="button" data-act="carry-on">Done, carry on</button>
       </div>
       <div class="pill">
-        <textarea id="reply" rows="1" aria-label="Message Homebrowser about this session" data-testid="reply"></textarea>
+        <textarea id="reply" rows="1" aria-label="Message Stealthbox about this session" data-testid="reply"></textarea>
         <button class="round" type="submit" id="s-send" data-testid="send" aria-label="Send"></button>
       </div>
       <span class="hint" id="s-compose-hint">Same tab, same conversation.</span>
@@ -590,14 +590,14 @@ function actionButton(label, act, cls = '') {
   return button;
 }
 
-// A reply reads in the order it happened: the steps, then what Homebrowser said.
+// A reply reads in the order it happened: the steps, then what Stealthbox said.
 function messageEl(m) {
   const el = document.createElement('div');
-  const asking = m.from === 'homebrowser' && ['needs_user', 'needs_input'].includes(m.status);
+  const asking = m.from === 'stealthbox' && ['needs_user', 'needs_input'].includes(m.status);
   el.className = 'm' + (m.from === 'you' ? ' you' : asking ? ' needs' : '');
-  el.dataset.testid = m.from === 'you' ? 'message-you' : 'message-homebrowser';
+  el.dataset.testid = m.from === 'you' ? 'message-you' : 'message-stealthbox';
   if (m.status) el.dataset.status = m.status;
-  const who = document.createElement('span'); who.className = 'who'; who.textContent = m.from === 'you' ? 'You' : 'Homebrowser';
+  const who = document.createElement('span'); who.className = 'who'; who.textContent = m.from === 'you' ? 'You' : 'Stealthbox';
   el.append(who);
   if (m.from === 'you') {
     const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = m.text;
@@ -638,7 +638,7 @@ function messageEl(m) {
     working.className = 'working' + (m.status === 'queued' ? ' queued' : '');
     working.innerHTML = '<span class="dot"></span><span></span>';
     working.lastElementChild.textContent = m.status === 'queued'
-      ? 'Waiting for the browser. Homebrowser works on one session at a time.'
+      ? 'Waiting for the browser. Stealthbox works on one session at a time.'
       : m.paused ? 'Holding while you drive.' : `${phaseOf(m).text}…`;
     if (running && !m.paused && phaseOf(m).reason) working.append(why(phaseOf(m).reason));
     el.append(working);
@@ -660,14 +660,14 @@ function messageEl(m) {
 // The line under the screen: the newest thing that happened in it.
 function renderNow(s, busyElsewhere) {
   const running = s.messages.findLast((m) => m.status === 'running');
-  const last = s.messages.findLast((m) => m.from === 'homebrowser');
+  const last = s.messages.findLast((m) => m.from === 'stealthbox');
   let kind = 'done', label = STATE_LABEL[s.state], text = '', reason = '', time = '', since = null;
   if (s.state === 'needs') {
     kind = 'needs'; label = 'Waiting for you';
     text = 'Do what the note above the page says, then press Done, carry on.';
   } else if (s.state === 'paused') {
     kind = 'paused'; label = 'Paused';
-    text = 'You have the mouse. Hand back to Homebrowser when you are done.';
+    text = 'You have the mouse. Hand back to Stealthbox when you are done.';
   } else if (s.state === 'waiting') {
     kind = 'waiting';
     text = busyElsewhere ? `The browser is working on ${title(busyElsewhere)} first.` : 'Starting soon.';
@@ -732,7 +732,7 @@ function renderBrowser() {
     const hint = document.createElement('div');
     hint.className = 'thread-hint';
     hint.dataset.testid = 'browser-hint';
-    hint.textContent = 'Ask Homebrowser to do something in this tab. It works in the tab you see, and you can watch it here.';
+    hint.textContent = 'Ask Stealthbox to do something in this tab. It works in the tab you see, and you can watch it here.';
     $('s-thread').replaceChildren(hint);
     threadSession = BROWSER;
   }
@@ -752,13 +752,13 @@ function renderBrowser() {
   $('s-driving').hidden = driven;
   connectLive(driven);
   $('s-now').className = 'now ' + (busy ? 'working' : 'done');
-  $('now-label').textContent = busy ? 'Homebrowser is working' : 'In front';
+  $('now-label').textContent = busy ? 'Stealthbox is working' : 'In front';
   $('now-text').replaceChildren(busy ? `on ${title(busy)}.` : 'Whatever the browser shows, including programs that drive it over CDP.');
   const clock = $('now-time');
   delete clock.dataset.since;
   clock.textContent = '';
   $('s-compose-needs').hidden = true;
-  $('reply').placeholder = tab ? 'Ask Homebrowser to do something in this tab…' : 'No tab open';
+  $('reply').placeholder = tab ? 'Ask Stealthbox to do something in this tab…' : 'No tab open';
   renderBrowserSend();
 }
 
@@ -791,7 +791,7 @@ function renderSession() {
   const actions = $('s-actions');
   actions.replaceChildren();
   if (s.state === 'working') actions.append(actionButton('Take over', 'pause'), actionButton('Stop', 'cancel', 'quiet'));
-  if (s.state === 'paused') actions.append(actionButton('Hand back to Homebrowser', 'resume', 'primary'), actionButton('Stop', 'cancel', 'quiet'));
+  if (s.state === 'paused') actions.append(actionButton('Hand back to Stealthbox', 'resume', 'primary'), actionButton('Stop', 'cancel', 'quiet'));
   if (s.state === 'waiting') actions.append(actionButton('Stop', 'cancel', 'quiet'));
   if (['done', 'stopped'].includes(s.state)) actions.append(actionButton('Close session', 'close', 'quiet'));
 
@@ -832,7 +832,7 @@ function renderSession() {
 
   renderNow(s, busyElsewhere);
   renderThread(s);
-  $('reply').placeholder = needs ? 'e.g. I signed in with Google, carry on' : s.state === 'working' || s.state === 'waiting' ? 'Message Homebrowser about this tab…' : 'e.g. Now sort by price';
+  $('reply').placeholder = needs ? 'e.g. I signed in with Google, carry on' : s.state === 'working' || s.state === 'waiting' ? 'Message Stealthbox about this tab…' : 'e.g. Now sort by price';
   renderSend(s);
 }
 
@@ -861,7 +861,7 @@ function showUrl(text, editable) {
   if (document.activeElement !== input) input.value = text;
   input.readOnly = !editable;
   input.title = editable ? 'Type an address or a search, then press Enter'
-    : 'Homebrowser is driving this tab. Take over or stop it to type an address.';
+    : 'Stealthbox is driving this tab. Take over or stop it to type an address.';
 }
 $('s-url').addEventListener('focus', () => { if (!$('s-url').readOnly) $('s-url').select(); });
 
@@ -986,7 +986,7 @@ document.addEventListener('webkitfullscreenchange', showFullScreen);
 // One sidebar button at the left of the header: on a wide screen it collapses the
 // sessions column (this browser remembers it); on a narrow one it opens them as a drawer.
 const NARROW = window.matchMedia('(max-width: 1100px)');
-const RAIL_KEY = 'homebrowser.sessionsHidden';
+const RAIL_KEY = 'stealthbox.sessionsHidden';
 function sidebarShown() {
   return NARROW.matches ? document.body.classList.contains('drawer') : !document.body.classList.contains('rail-hidden');
 }
@@ -1275,7 +1275,7 @@ document.addEventListener('keydown', (event) => {
 
 // After the setup page or a password link: say what was saved, once.
 const SAVED = {
-  setup: '<b>Homebrowser is set up.</b> OpenRouter accepted the key, and this browser is signed in to the console for 30 days.',
+  setup: '<b>Stealthbox is set up.</b> OpenRouter accepted the key, and this browser is signed in to the console for 30 days.',
   password: '<b>Password saved.</b> Every other device is signed out. This one is signed in for 30 days.',
 };
 const saved = new URLSearchParams(location.search).get('saved');

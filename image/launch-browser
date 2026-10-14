@@ -3,7 +3,7 @@
 
 cdp-server runs the browser pool, GeoIP and native input, and starts the browser
 with fingerprint flags: --fingerprint=<seed>, --fingerprint-platform,
---fingerprint-timezone, --lang and so on. HOMEBROWSER_BINARY_PATH points it
+--fingerprint-timezone, --lang and so on. STEALTHBOX_BINARY_PATH points it
 here instead. This turns those flags into a Fury persona config, hands the
 config to the core on descriptor 3 (--fury-fp-fd=3), and execs the core in this
 process, so cdp-server's handle on it stays valid.
@@ -24,7 +24,7 @@ import sys
 import tempfile
 
 import geoip2.database
-from homebrowser_launcher.geoip import _ensure_geoip_db
+from stealthbox_launcher.geoip import _ensure_geoip_db
 
 CORE = "/opt/fury/chrome"
 PERSONAS = "/opt/fury/personas.json"
@@ -79,7 +79,7 @@ def sub_seed(seed, purpose):
 
 
 def choose_persona(platform, seed):
-    width, height = (int(n) for n in os.environ.get("HOMEBROWSER_DISPLAY_SIZE", "1920x1080").split("x"))
+    width, height = (int(n) for n in os.environ.get("STEALTHBOX_DISPLAY_SIZE", "1920x1080").split("x"))
     wanted_os = {"macos": "macOS", "windows": "Windows"}[platform]
     with open(PERSONAS) as f:
         personas = json.load(f)
@@ -91,7 +91,7 @@ def choose_persona(platform, seed):
     ]
     if not matching:
         raise SystemExit(f"launch-browser: no {wanted_os} persona has a {width}x{height} screen; "
-                         f"set HOMEBROWSER_DISPLAY_SIZE to one that a catalogue persona has")
+                         f"set STEALTHBOX_DISPLAY_SIZE to one that a catalogue persona has")
     # Weighted by how common the machine is, as Fury's own pick is.
     point = (mix(seed) % 1_000_000) / 1_000_000 * sum(p["weight"] for p in matching)
     for persona in matching:

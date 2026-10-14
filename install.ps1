@@ -1,17 +1,17 @@
 # One-step install or update for Windows (Docker Desktop with WSL 2), in PowerShell:
-#   gh api repos/jonclegg/homebrowser/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex
+#   gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex
 #
 # The repository is private, so the GitHub CLI must be signed in (gh auth login).
 #
-# Works in Windows PowerShell 5.1 and PowerShell 7. The app lives in ~\.homebrowser\app and is
+# Works in Windows PowerShell 5.1 and PowerShell 7. The app lives in ~\.stealthbox\app and is
 # replaced wholesale from a GitHub zip on every run; the previous copy is kept in
-# ~\.homebrowser\app.previous and your .env settings carry over.
-# Optional: $env:HOMEBROWSER_ZIP_URL installs from a zip at that URL instead.
+# ~\.stealthbox\app.previous and your .env settings carry over.
+# Optional: $env:STEALTHBOX_ZIP_URL installs from a zip at that URL instead.
 #
 # For agents running this for a user: without Docker Desktop the installer changes
-# nothing and stops after a line starting "HOMEBROWSER_NEEDS: docker". Ask the user
-# whether to install it, and if they agree, set $env:HOMEBROWSER_INSTALL_DOCKER = "yes"
-# and run it again. "HOMEBROWSER_NEEDS: user" means a step only the user can do
+# nothing and stops after a line starting "STEALTHBOX_NEEDS: docker". Ask the user
+# whether to install it, and if they agree, set $env:STEALTHBOX_INSTALL_DOCKER = "yes"
+# and run it again. "STEALTHBOX_NEEDS: user" means a step only the user can do
 # (finishing Docker Desktop's first-run setup, a restart); it says which.
 
 $ErrorActionPreference = "Stop"
@@ -20,15 +20,15 @@ function Fail($message) {
     Write-Host ""
     Write-Host "Problem: $message" -ForegroundColor Red
     Write-Host ""
-    throw "Homebrowser install stopped."
+    throw "Stealthbox install stopped."
 }
 
 function Needs($kind, $message) {
     Write-Host ""
-    Write-Host "HOMEBROWSER_NEEDS: $kind"
+    Write-Host "STEALTHBOX_NEEDS: $kind"
     Write-Host $message
     Write-Host ""
-    throw "Homebrowser install stopped: needs $kind."
+    throw "Stealthbox install stopped: needs $kind."
 }
 
 function Wait-DockerEngine($seconds) {
@@ -41,12 +41,12 @@ function Wait-DockerEngine($seconds) {
 }
 
 function Install-DockerDesktop {
-    if ($env:HOMEBROWSER_INSTALL_DOCKER -ne "yes") {
-        Needs "docker" ("Homebrowser runs its browser in a Linux container, and Docker Desktop is not installed.`n" +
+    if ($env:STEALTHBOX_INSTALL_DOCKER -ne "yes") {
+        Needs "docker" ("Stealthbox runs its browser in a Linux container, and Docker Desktop is not installed.`n" +
             "It would install Docker Desktop with winget (Windows asks for administrator approval):`n" +
             "  winget install -e --id Docker.DockerDesktop`n`n" +
             "To install it, run the installer again with:`n" +
-            "  `$env:HOMEBROWSER_INSTALL_DOCKER = `"yes`"; gh api repos/jonclegg/homebrowser/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex")
+            "  `$env:STEALTHBOX_INSTALL_DOCKER = `"yes`"; gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex")
     }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Needs "user" "winget is not available here. Install Docker Desktop from https://docs.docker.com/desktop/setup/install/windows-install/, open it once, then run the installer again."
@@ -69,13 +69,13 @@ function Start-DockerDesktop {
     Needs "user" ("Docker Desktop is installed but its engine is not running.`n" +
         "Open Docker Desktop from the Start menu and finish its first-run setup (accept the terms;`n" +
         "if it asks to install or update WSL, allow it and restart Windows if asked).`n" +
-        "When it says 'Engine running', run the Homebrowser installer again.")
+        "When it says 'Engine running', run the Stealthbox installer again.")
 }
 
-function Install-Homebrowser {
-    $zipUrl = $env:HOMEBROWSER_ZIP_URL
-    if (-not $zipUrl -and -not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail "Install the GitHub CLI (https://cli.github.com) and sign in with gh auth login: Homebrowser is a private repository." }
-    $stateDir = Join-Path $HOME ".homebrowser"
+function Install-Stealthbox {
+    $zipUrl = $env:STEALTHBOX_ZIP_URL
+    if (-not $zipUrl -and -not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail "Install the GitHub CLI (https://cli.github.com) and sign in with gh auth login: Stealthbox is a private repository." }
+    $stateDir = Join-Path $HOME ".stealthbox"
     $installDir = Join-Path $stateDir "app"
 
     # Windows PowerShell 5.1 may default to TLS 1.0, which GitHub refuses.
@@ -92,7 +92,7 @@ function Install-Homebrowser {
         $osType = (docker info --format "{{.OSType}}" 2>$null)
     }
     if ($osType -ne "linux") {
-        Fail "Docker is set to Windows containers, and Homebrowser needs Linux containers.`nRight-click the Docker icon in the taskbar, choose 'Switch to Linux containers...', then run this again."
+        Fail "Docker is set to Windows containers, and Stealthbox needs Linux containers.`nRight-click the Docker icon in the taskbar, choose 'Switch to Linux containers...', then run this again."
     }
     docker compose version *> $null
     if ($LASTEXITCODE -ne 0) {
@@ -107,15 +107,15 @@ function Install-Homebrowser {
     $stage = Join-Path $stateDir (".download-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $stage | Out-Null
     try {
-        Write-Host "Downloading Homebrowser..."
+        Write-Host "Downloading Stealthbox..."
         $zip = Join-Path $stage "app.zip"
         if ($zipUrl) { Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing }
-        else { gh api repos/jonclegg/homebrowser/zipball/main > $zip; if ($LASTEXITCODE -ne 0) { Fail "Could not download Homebrowser with the GitHub CLI; sign in with gh auth login." } }
+        else { gh api repos/jonclegg/stealthbox/zipball/main > $zip; if ($LASTEXITCODE -ne 0) { Fail "Could not download Stealthbox with the GitHub CLI; sign in with gh auth login." } }
         Expand-Archive -Path $zip -DestinationPath (Join-Path $stage "x")
         $new = Get-ChildItem -Path (Join-Path $stage "x") -Directory |
             Where-Object { (Test-Path (Join-Path $_.FullName "start.ps1")) -and (Test-Path (Join-Path $_.FullName "docker-compose.yml")) } |
             Select-Object -First 1
-        if (-not $new) { Fail "The download doesn't look like Homebrowser." }
+        if (-not $new) { Fail "The download doesn't look like Stealthbox." }
         # Files from the internet are marked as such; unblock them so start.ps1 may run.
         Get-ChildItem -Path $new.FullName -Recurse -File | Unblock-File
         $oldEnv = Join-Path $installDir ".env"
@@ -125,16 +125,16 @@ function Install-Homebrowser {
             if (Test-Path $previous) { Remove-Item -Recurse -Force $previous }
             Move-Item $installDir $previous
             Move-Item $new.FullName $installDir
-            Write-Host "Updated Homebrowser. The previous copy is in $previous"
+            Write-Host "Updated Stealthbox. The previous copy is in $previous"
         } else {
             Move-Item $new.FullName $installDir
-            Write-Host "Installed Homebrowser in $installDir"
+            Write-Host "Installed Stealthbox in $installDir"
         }
     } finally {
         if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     }
 
-    Write-Host "Starting Homebrowser..."
+    Write-Host "Starting Stealthbox..."
     # start.ps1 changes the current folder; give the user theirs back afterwards.
     Push-Location
     try { & (Join-Path $installDir "start.ps1") } finally { Pop-Location }
@@ -142,4 +142,4 @@ function Install-Homebrowser {
     Write-Host ("Stop:               & `"" + (Join-Path $installDir "stop.ps1") + "`"")
 }
 
-Install-Homebrowser
+Install-Stealthbox

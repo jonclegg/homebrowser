@@ -1,7 +1,7 @@
-"""Homebrowser's embedded DeepSeek driver.
+"""Stealthbox's embedded DeepSeek driver.
 
-A caller chats with Homebrowser; each message becomes one turn. DeepSeek (via
-OpenRouter) looks at the screen, picks the next browser action, and Homebrowser
+A caller chats with Stealthbox; each message becomes one turn. DeepSeek (via
+OpenRouter) looks at the screen, picks the next browser action, and Stealthbox
 executes it humanized, until DeepSeek replies to the caller.
 
 Design notes
@@ -57,16 +57,16 @@ from PIL import Image, ImageChops
 from websockets.sync.client import connect as websocket_connect
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.environ.get("HOMEBROWSER_EXAMPLES", os.path.join(os.path.dirname(HERE), "examples")))
+sys.path.insert(0, os.environ.get("STEALTHBOX_EXAMPLES", os.path.join(os.path.dirname(HERE), "examples")))
 
 import bing_first  # noqa: E402
 import humanize  # noqa: E402
 import page_images  # noqa: E402
 
-DEFAULT_MODEL = os.environ.get("HOMEBROWSER_MODEL") or "deepseek/deepseek-v4.1-flash"
+DEFAULT_MODEL = os.environ.get("STEALTHBOX_MODEL") or "deepseek/deepseek-v4.1-flash"
 # Takes a step when the default model is going round in circles: date pickers and
 # custom dropdowns are where Flash gets stuck. About 1.5 cents a step.
-ESCALATION_MODEL = os.environ.get("HOMEBROWSER_ESCALATION_MODEL") or "anthropic/claude-sonnet-5.5"
+ESCALATION_MODEL = os.environ.get("STEALTHBOX_ESCALATION_MODEL") or "anthropic/claude-sonnet-5.5"
 # Waits on an unchanged screen before the model is told (still_waits), and twice
 # that before the step goes to the escalation model.
 STILL_WAITS = 3
@@ -74,7 +74,7 @@ STILL_WAITS = 3
 # or, as a guard against a page whose animation never stops, after RUN_STEP_CAP steps.
 RUN_STEP_CAP = 400
 API = "https://openrouter.ai/api/v1/chat/completions"
-DATA_DIR = os.environ.get("HOMEBROWSER_DATA", "/data")
+DATA_DIR = os.environ.get("STEALTHBOX_DATA", "/data")
 KEY_PATH = os.path.join(DATA_DIR, "openrouter.key")
 
 BLOCK_PATTERNS = {
@@ -91,7 +91,7 @@ BLOCK_PATTERNS = {
 # Challenge widgets by name: {name: CSS selector}. Only real *widget elements*
 # count: a normal page routinely names a captcha vendor inside its JS bundles, so
 # matching raw page HTML produces false positives. The vendors' own markers are
-# not part of Homebrowser; <data>/guidance/bot-checks.json adds them (a
+# not part of Stealthbox; <data>/guidance/bot-checks.json adds them (a
 # {"widgets": {name: selector}} object). Without it, the wording, the URL and the
 # model's own view of the screen find a check.
 CHALLENGE_WIDGETS = {
@@ -182,13 +182,13 @@ READ_LINK_LIMIT = 60
 # ---------------------------------------------------------------- OpenRouter
 
 def api_key() -> str:
-    """The key from <data>/openrouter.key, which `homebrowser key` writes."""
+    """The key from <data>/openrouter.key, which `stealthbox key` writes."""
     if os.path.exists(KEY_PATH):
         with open(KEY_PATH) as fh:
             key = fh.read().strip()
         if key:
             return key
-    raise RuntimeError("No OpenRouter key yet. Run `homebrowser key` and paste it into the page it opens.")
+    raise RuntimeError("No OpenRouter key yet. Run `stealthbox key` and paste it into the page it opens.")
 
 
 def chat(messages, model, max_tokens=8000, temperature=0.1, json_mode=False):
@@ -212,8 +212,8 @@ def chat(messages, model, max_tokens=8000, temperature=0.1, json_mode=False):
         headers={
             "Authorization": f"Bearer {api_key()}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/jonclegg/homebrowser",
-            "X-Title": "Homebrowser",
+            "HTTP-Referer": "https://github.com/jonclegg/stealthbox",
+            "X-Title": "Stealthbox",
         },
     )
     try:
@@ -330,7 +330,7 @@ def display_thumbnail(width):
     return out.getvalue()
 
 
-# The default identity's browser history (homebrowser-serve.sh keeps its profile here).
+# The default identity's browser history (stealthbox-serve.sh keeps its profile here).
 HISTORY_DB = "/profile/default/Default/History"
 
 
@@ -880,12 +880,12 @@ def decide(page, shot, turn, model):
             "press Enter, `read` to find the link you need and `goto` it, or reply.\n"
         )
     prompt = (
-        f"You are Homebrowser. You operate a real Chrome browser for a caller who "
+        f"You are Stealthbox. You operate a real Chrome browser for a caller who "
         f"chats with you. Work through the caller's latest message one browser "
         f"action per step, then reply to them.\n\n"
         f"Conversation so far:\n{_conversation_text(turn.conversation)}\n\n"
         f"Caller's latest message: {turn.message}\n\n"
-        f"Your notebook (guidance that ships with Homebrowser, lessons you wrote on "
+        f"Your notebook (guidance that ships with Stealthbox, lessons you wrote on "
         f"earlier runs, and the run log):\n"
         f"{turn.notebook.context_for(site)}\n\n"
         f"Your working memory for this message:\n{memory}\n\n"
@@ -1438,7 +1438,7 @@ def reflect(turn, status, reply):
     ]
     existing = "\n\n".join(f"{site}:\n{turn.notebook.notes_for(site)}" for site in turn.sites)
     prompt = (
-        f"You are Homebrowser reviewing your own browser run, to keep notes for next "
+        f"You are Stealthbox reviewing your own browser run, to keep notes for next "
         f"time.\nCaller's message: {turn.message}\nOutcome: {status}: {reply}\n"
         f"Steps:\n{json.dumps(log)}\n\nNotes you already have:\n{existing or '(none)'}\n\n"
         f"Write only lessons that are new and would save time on a future run: a bot "

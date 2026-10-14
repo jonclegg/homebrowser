@@ -1,20 +1,20 @@
 """Setup: pages where the user types the OpenRouter key and the console password,
 so neither goes through an agent's chat.
 
-`homebrowser key` asks the API for a one-time link (`/setup?code=...`, 15 minutes).
-The user opens it in their own browser, or in Homebrowser's browser through the
+`stealthbox key` asks the API for a one-time link (`/setup?code=...`, 15 minutes).
+The user opens it in their own browser, or in Stealthbox's browser through the
 viewer when they are away from the machine, pastes the key and chooses the
-console password. Homebrowser checks the key with OpenRouter and writes
+console password. Stealthbox checks the key with OpenRouter and writes
 <data>/openrouter.key, mode 600. The model reads that file on every call, so
 nothing restarts. Once a password is set, the page can leave it as it is. Saving
-signs that browser in to the console and opens it, except in Homebrowser's own
+signs that browser in to the console and opens it, except in Stealthbox's own
 browser, which the user is already watching through the console.
 
 The page takes no bearer token (the user has none), so it is guarded instead:
 the one-time code, and a Host header that must be localhost, which stops another
 website in the user's browser from swapping in a key of its own.
 
-`homebrowser password` gives a one-time link (`/password?code=...`) to the password
+`stealthbox password` gives a one-time link (`/password?code=...`) to the password
 alone, for an install that has none yet or a user who forgot it. That one works
 through the share too, since the user is often away; the code is what guards it.
 """
@@ -130,7 +130,7 @@ def describe(info):
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Homebrowser setup</title>
+<title>Stealthbox setup</title>
 <style>
   :root {{ --bg: #f6f5f2; --card: #fff; --ink: #1d1d1b; --muted: #6b6a66; --line: #dddbd5;
           --accent: #2f5d50; --good: #2f6b3a; --fair: #9a6b12; --bad: #9a2f2f; }}
@@ -172,18 +172,18 @@ PAGE = """<!doctype html>
 </style></head>
 <body><main><div class="card">{body}</div></main></body></html>"""
 
-FORM = """<h1>Set up Homebrowser</h1>
+FORM = """<h1>Set up Stealthbox</h1>
 <p>Two things, both kept on this machine. Your agent never sees either one.</p>
 {message}
 <form method="post" action="/setup">
   <input type="hidden" name="code" value="{code}">
   {in_browser}
-  <input type="text" name="username" value="homebrowser" autocomplete="username" hidden>
+  <input type="text" name="username" value="stealthbox" autocomplete="username" hidden>
   <label for="key">OpenRouter key</label>
   <input id="key" name="key" type="password" autocomplete="off" spellcheck="false"
          placeholder="sk-or-v1-..." required autofocus>
-  <p class="hint">Homebrowser drives the browser with DeepSeek through OpenRouter. It keeps the key in
-  <code>~/.homebrowser/data/openrouter.key</code>. Create one at
+  <p class="hint">Stealthbox drives the browser with DeepSeek through OpenRouter. It keeps the key in
+  <code>~/.stealthbox/data/openrouter.key</code>. Create one at
   <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</p>
   <h2>Console password</h2>
   <p>You type this when you open a share link, for example on your phone, to watch or take over the
@@ -193,13 +193,13 @@ FORM = """<h1>Set up Homebrowser</h1>
 </form>"""
 
 PASSWORD_FORM = """<h1>{title}</h1>
-<p>You type this when you open a share link to the Homebrowser console, for example on your phone.
+<p>You type this when you open a share link to the Stealthbox console, for example on your phone.
 {effect}</p>
 {message}
 <form method="post" action="/password">
   <input type="hidden" name="code" value="{code}">
   <input type="hidden" name="session" value="{session}">
-  <input type="text" name="username" value="homebrowser" autocomplete="username" hidden>
+  <input type="text" name="username" value="stealthbox" autocomplete="username" hidden>
   {password_fields}
   <button type="submit">Save password</button>
 </form>"""
@@ -215,7 +215,7 @@ EXPIRED = """<h1>This link has expired</h1>
 
 
 def form_page(code, password_set, in_browser, error=None):
-    """`in_browser`: the page is in Homebrowser's own browser, so saving stays on it
+    """`in_browser`: the page is in Stealthbox's own browser, so saving stays on it
     instead of going on to the console."""
     message = f'<p class="bad">{html.escape(error)}</p>' if error else ""
     fields = console_auth.password_fields(

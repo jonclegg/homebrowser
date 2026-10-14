@@ -2,10 +2,10 @@
 
 Optional feature — requires ``geoip2`` package::
 
-    pip install homebrowser_launcher[geoip]
+    pip install stealthbox_launcher[geoip]
 
 Downloads GeoLite2-City.mmdb (~70 MB) on first use, caches in
-``~/.homebrowser/geoip/``.  Background re-download after 30 days.
+``~/.stealthbox/geoip/``.  Background re-download after 30 days.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-logger = logging.getLogger("homebrowser_launcher")
+logger = logging.getLogger("stealthbox_launcher")
 
 # P3TERX mirror of MaxMind GeoLite2-City — no license key needed
 GEOIP_DB_URL = (
@@ -33,7 +33,7 @@ GEOIP_UPDATE_INTERVAL = 30 * 86_400  # 30 days
 
 DEFAULT_GEOIP_TIMEOUT_SECONDS = 20.0
 
-GEOIP_TIMEOUT_ENV = "HOMEBROWSER_GEOIP_TIMEOUT_SECONDS"
+GEOIP_TIMEOUT_ENV = "STEALTHBOX_GEOIP_TIMEOUT_SECONDS"
 
 # Serializes GeoIP DB downloads within a process so N concurrent launches
 # don't each fetch the same ~70 MB file (issue #458). Per-process only.
@@ -95,7 +95,7 @@ def resolve_proxy_geo_with_ip(
     except ImportError:
         raise ImportError(
             "geoip2 is required for geoip=True. Install it with:\n"
-            "  pip install 'homebrowser_launcher[geoip]'"
+            "  pip install 'stealthbox_launcher[geoip]'"
         ) from None
 
     # Ensure the DB first — the download must NOT be bounded by the resolution
@@ -242,7 +242,7 @@ def _resolve_exit_ip(proxy_url: str | None, timeout: float | None = None) -> str
             return ip
         except httpx.UnsupportedProtocol:
             logger.warning(
-                "SOCKS5 proxy requires socksio: pip install 'homebrowser_launcher[geoip]'"
+                "SOCKS5 proxy requires socksio: pip install 'stealthbox_launcher[geoip]'"
             )
             return None
         except Exception:

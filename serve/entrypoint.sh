@@ -8,9 +8,9 @@
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 
 # Start Xvfb for headed mode (challenge widgets), then run user command.
-# HOMEBROWSER_DISPLAY_SIZE sets the virtual screen; the macOS persona reports a
+# STEALTHBOX_DISPLAY_SIZE sets the virtual screen; the macOS persona reports a
 # Retina DPR of 2 only on a large display (e.g. 3840x2160).
-Xvfb :99 -screen 0 "${HOMEBROWSER_DISPLAY_SIZE:-1920x1080}x24" -nolisten tcp &
+Xvfb :99 -screen 0 "${STEALTHBOX_DISPLAY_SIZE:-1920x1080}x24" -nolisten tcp &
 
 # Wait for the X server to actually accept connections before starting the WM.
 # A blind `sleep 1` races under a CPU-starved start: openbox can come up before

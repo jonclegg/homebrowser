@@ -1,6 +1,6 @@
 """Save the photos of the item on a page: a listing, a product, an article.
 
-The model points at the main photo (x, y). From that element Homebrowser climbs to
+The model points at the main photo (x, y). From that element Stealthbox climbs to
 the nearest container holding several images, which is the gallery, so photos
 from "similar items" carousels further down the page stay out. Without a point
 it takes the page's structured data (JSON-LD `image`) and every image on the page.
@@ -14,7 +14,7 @@ real photo size. The same photo at several sizes is kept once, at its largest.
 Some pages never put the real photos in the DOM. A car seller draws its gallery on a
 canvas; the DOM holds only a blurred placeholder (`?blur=10`, 1024 px wide, so it
 passes the size check) and 180 px thumbnails, while the full gallery sits in the
-page's hydration data. So Homebrowser also reads the JSON in inline scripts
+page's hydration data. So Stealthbox also reads the JSON in inline scripts
 (including JSON nested in script strings, like Next.js `self.__next_f`), finds the
 smallest object that holds every photo the page shows (matched on host and path,
 since the DOM copy differs only in its size query), and takes the image URLs on

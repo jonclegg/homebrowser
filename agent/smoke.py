@@ -1,4 +1,4 @@
-"""`homebrowser smoke`: show that the install works by reaching a few sites.
+"""`stealthbox smoke`: show that the install works by reaching a few sites.
 
 The sites are the caller's, or with none named, the list in <data>/smoke-sites.txt
 (one domain per line), which a site pack installs.
@@ -92,7 +92,7 @@ def check_site(context, smoke, site, notebook, has_key):
         result["title"] = (landed.title() or "")[:120]
         result["url"] = landed.url
         if blocks and not has_key:
-            result["note"] = "A bot check is up; with the OpenRouter key set, Homebrowser works it."
+            result["note"] = "A bot check is up; with the OpenRouter key set, Stealthbox works it."
     except Exception as exc:  # noqa: BLE001 - one site's failure is a result, not a crash
         result["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
     shot = f"{site}.png"
@@ -145,7 +145,7 @@ def report_html(smoke):
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Homebrowser smoke test</title>
+<title>Stealthbox smoke test</title>
 <style>
   :root {{ --bg: #f6f5f2; --card: #fff; --ink: #1d1d1b; --muted: #6b6a66; --line: #dddbd5;
           --good: #2f6b3a; --bad: #9a2f2f; }}
@@ -167,9 +167,9 @@ def report_html(smoke):
   .ok .mark {{ color: var(--good); }} .bad .mark {{ color: var(--bad); }}
 </style></head>
 <body><main>
-<h1>Homebrowser reached {passed} of {len(smoke.sites)} sites</h1>
+<h1>Stealthbox reached {passed} of {len(smoke.sites)} sites</h1>
 <p class="muted">Each site was entered from a Bing search, the way a person would, in your
-Homebrowser browser. These are the pages it landed on.</p>
+Stealthbox browser. These are the pages it landed on.</p>
 {pending}
 <div class="grid">{''.join(cards)}</div>
 </main></body></html>"""

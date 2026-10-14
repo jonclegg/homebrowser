@@ -1,8 +1,8 @@
 """The console password, and the devices signed in with it.
 
-The console (what `homebrowser share` links) asks for a password. The user sets it
+The console (what `stealthbox share` links) asks for a password. The user sets it
 on the setup page beside the OpenRouter key, or on a one-time password link an
-agent asks for (`homebrowser password`) when they have none yet or forgot it. Only a
+agent asks for (`stealthbox password`) when they have none yet or forgot it. Only a
 scrypt hash is kept, in <data>/console-password, mode 600.
 
 Signing in gives that browser its own random cookie, good for 30 days on the host
@@ -33,7 +33,7 @@ MIN_LENGTH = 8
 # Strength 0 is refused and 1 ("Weak") is shown but refused too.
 MIN_STRENGTH = 2
 # Refused anywhere in the password; the setup pages get the same list.
-GUESSABLE = ("password", "homebrowser", "qwerty", "123456", "abcdef", "letmein", "iloveyou")
+GUESSABLE = ("password", "stealthbox", "qwerty", "123456", "abcdef", "letmein", "iloveyou")
 DEVICE_SECONDS = 30 * 24 * 3600
 MAX_FAILURES = 5
 LOCK_SECONDS = 15 * 60
@@ -277,7 +277,7 @@ SIGN_IN = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Homebrowser</title>
+<title>Stealthbox</title>
 <style>
   :root {{ color-scheme: dark; --ground: #0E1014; --panel: #161920; --raised: #1D212A; --line: #2A2F3A;
           --ink: #E8EAEF; --muted: #9AA1AD; --soft: #C3C8D1; --accent: #7AA7FF; --accent-strong: #3D6FF0; --bad: #FF8A80; }}
@@ -302,15 +302,15 @@ SIGN_IN = """<!doctype html>
 <body><main>
   <div class="brand">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a2.5 2.5 0 0 1 2.5 2.5c0 1.4-1.2 2-2.5 3.2V10"/><path d="M12 10 3 17.5h18L12 10Z"/></svg>
-    Homebrowser
+    Stealthbox
   </div>
   {body}
 </main></body></html>"""
 
 SIGN_IN_FORM = """<h1>Sign in to the console</h1>
-<p>The live browser and what Homebrowser is doing in it.</p>
+<p>The live browser and what Stealthbox is doing in it.</p>
 <form method="post" action="/console/sign-in" data-testid="sign-in">
-  <input type="text" name="username" value="homebrowser" autocomplete="username" hidden>
+  <input type="text" name="username" value="stealthbox" autocomplete="username" hidden>
   <input type="hidden" name="session" id="session" value="{session}">
   <label for="password">Console password</label>
   <input id="password" name="password" type="password" autocomplete="current-password" required autofocus
@@ -319,11 +319,11 @@ SIGN_IN_FORM = """<h1>Sign in to the console</h1>
   <button type="submit">Sign in</button>
 </form>
 <p class="foot">This device stays signed in for 30 days. Forgot the password? Ask your agent for a reset link
-(<code>homebrowser password</code>). It signs out every device.</p>
+(<code>stealthbox password</code>). It signs out every device.</p>
 <script>if (location.hash) document.getElementById('session').value = decodeURIComponent(location.hash.slice(1));</script>"""
 
 NO_PASSWORD = """<h1>No console password yet</h1>
-<p>The console opens only with a password, and none is set. On the computer running Homebrowser,
+<p>The console opens only with a password, and none is set. On the computer running Stealthbox,
 open <code>{local_console}</code> and choose one there. Or ask your agent for a password link.</p>"""
 
 
