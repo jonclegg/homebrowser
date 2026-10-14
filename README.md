@@ -2,11 +2,11 @@
 
 A browser for your AI agent that websites don't block, and that stays logged in. It runs in a container on your own computer, and you can watch it or take over from your phone.
 
-<img src="docs/images/kettlebrook-search.jpg" alt="A home goods store's search results for a 12-cup coffee maker, filtered to under $50 and 4 stars and up">
+<img src="docs/images/console-hero.jpg" alt="The Homebrowser console: a run on a home goods store, its steps listed beside the live browser, clicking Add to cart on the best-rated coffee maker under $50">
 
 > **You:** *"With Homebrowser, find a 12-cup coffee maker under $50 with good reviews and put the best one in my cart."*
 >
-> **Homebrowser:** Added the Brightbrew 12-Cup Programmable, $44.99, 4.6 stars from 2,318 reviews: the best-rated maker under $50.
+> Homebrowser searches the store, filters to under $50 and 4 stars and up, sorts by rating, and adds the best one to your cart. You can watch every step, and why it took it, in the Homebrowser console.
 
 ## What you can hand it
 
@@ -15,62 +15,49 @@ Ask your agent to do things on websites "with Homebrowser". It opens a real brow
 <table>
 <tr>
 <td width="50%" valign="top">
-<img src="docs/images/ledgerline-course.jpg" alt="A training course's video lesson, 6:48 into 9:20, with the Next lesson button locked">
+<img src="docs/images/console-training.jpg" alt="The Homebrowser console waiting for a training video to finish before the Next lesson button unlocks">
 
 **Training.** *"Work through my assigned compliance course. Stop when you reach a quiz."*
 
-Follows the course player into its pop-up window, waits out each video until **Next** unlocks, and hands you the quiz: *Finished lessons 1 to 4 (38 minutes of video). The lesson 5 quiz is ready for you.*
+Follows the course player into its pop-up window and waits out each video until **Next** unlocks. Then it hands you the quiz.
 </td>
 <td width="50%" valign="top">
-<img src="docs/images/motorly-listings.jpg" alt="Used electric car listings under $30,000 within 50 miles">
+<img src="docs/images/console-motorly.jpg" alt="The Homebrowser console after a finished run on a used car listings site">
 
 **Shopping around.** *"Find used electric cars under $30,000 within 50 miles and save the photos of each."*
 
-Reads every listing and saves the photos: *9 listings, 214 photos saved to `~/.homebrowser/data/images/`, with a summary of each car.*
+*9 listings under $30,000 within 50 miles; 214 photos saved, with a summary of each car.*
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<img src="docs/images/northgate-signin.jpg" alt="A utility company's account sign-in page">
-
-**Paperwork.** *"Download my last 12 power bills as PDFs."*
-
-Stops at the sign-in page and your agent sends you a link. You sign in from your phone, tap **Done, carry on**, and it saves all 12.
-</td>
-<td width="50%" valign="top">
-<img src="docs/images/brightside-booking.jpg" alt="A dental office's booking calendar with Tuesday at 8:30 am selected">
+<img src="docs/images/console-brightside.jpg" alt="The Homebrowser console after booking a dental cleaning">
 
 **Appointments.** *"Book my next cleaning on the earliest Tuesday morning."*
 
-Works the calendar and the form: *Booked Tuesday, November 3 at 8:30 am with Dr. Osei. The confirmation is in your email.*
+*Booked Tuesday, November 3 at 8:30 am with Dr. Osei. The confirmation is in your email.*
 </td>
-</tr>
-<tr>
 <td width="50%" valign="top">
-<img src="docs/images/maple-library.jpg" alt="A library account with three books renewed and one that can't be renewed">
+<img src="docs/images/console-maple.jpg" alt="The Homebrowser console after renewing library books">
 
 **Errands.** *"Renew my library books that are due this week."*
 
-Does what it can and says what it couldn't: *Renewed 3 of 4. The Ninth Lighthouse has a hold on it, so it's due back Sunday, October 18.*
-</td>
-<td width="50%" valign="top">
-
-**And the rest of your list.**
-
-- *"Tell me if Denver to Lisbon in May drops under $700."*
-- *"A table for 4 on Friday at 7, somewhere quiet."*
-- *"Renew my parking permit."*
-- *"Download my last three pay stubs."*
-- *"Is anything I ordered still on its way?"*
-
-Anything you'd do in a browser yourself. It keeps notes on each site it visits, so the next run starts out knowing where things are.
+*Renewed 3 of 4. The Ninth Lighthouse has a hold on it, so it's due back Sunday, October 18.*
 </td>
 </tr>
 </table>
 
+And the rest of your list: *"Tell me if Denver to Lisbon in May drops under $700."* *"A table for 4 on Friday at 7, somewhere quiet."* *"Download my last three pay stubs."* Anything you'd do in a browser yourself. It keeps notes on each site it visits, so the next run starts out knowing where things are.
+
 ## Watch it, or step in
 
-Ask your agent to share the Homebrowser console. It's a private link that works from your phone or any computer, behind a password you choose. In the console you can:
+<img src="docs/images/console-northgate.jpg" alt="The Homebrowser console asking you to sign in to a utility company's site, with a Done, carry on button">
+
+> **You:** *"Download my last 12 power bills as PDFs."*
+
+When a site needs you, like a sign-in, Homebrowser stops and your agent sends you a link to the console. You sign in on the page from your phone or any computer, tap **Done, carry on**, and it downloads the bills.
+
+The console is a private link behind a password you choose. In it you can:
 
 - see every session and what it's doing right now,
 - watch the live browser, type a new address, or take over the mouse,
@@ -100,4 +87,4 @@ That's it. Your agent will:
 
 ## License
 
-Homebrowser's own code is [MIT licensed](LICENSE). The browser is Chromium (BSD-3-Clause) with Fury's patches (BSD-3-Clause); see [NOTICE](NOTICE) for every component's license. Homebrowser is an independent project, not affiliated with the Fury authors or any website it visits. The sites in this README are made up, and their pictures are illustrations.
+Homebrowser's own code is [MIT licensed](LICENSE). The browser is Chromium (BSD-3-Clause) with Fury's patches (BSD-3-Clause); see [NOTICE](NOTICE) for every component's license. Homebrowser is an independent project, not affiliated with the Fury authors or any website it visits. The sites in this README are made up: the pictures show the real console with illustrated sites in it.
