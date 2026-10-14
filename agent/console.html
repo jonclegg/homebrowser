@@ -805,28 +805,32 @@ function renderSession() {
   }
   $('s-paused').hidden = s.state !== 'paused';
 
-  // The live view shows whatever tab is in front. A run at work keeps its tab there;
-  // otherwise use it when this session's tab is in front, or when there is no
-  // screenshot of the session to show yet (a blank panel looks like a dead screen).
+  // The live view shows whatever tab is in front, which is this session's only when
+  // its tab is in front: another program sharing the browser (the FSD finder) brings
+  // its own tabs there, even while a run works. Otherwise show the session's last
+  // screenshot, or the live view while there is none yet (a blank panel looks like
+  // a dead screen), labelled as another tab.
   const driving = ['working', 'paused'].includes(s.state);
-  const live = s.in_front || driving || !s.shot_url;
-  const interactive = (s.in_front || driving) && ['needs', 'paused', 'done', 'stopped'].includes(s.state);
+  const live = s.in_front || !s.shot_url;
+  const interactive = (s.in_front || s.state === 'paused') && ['needs', 'paused', 'done', 'stopped'].includes(s.state);
   $('s-browser').classList.toggle('mine', interactive && !needs);
   $('s-browser').classList.toggle('needs', needs);
   $('s-driving').hidden = !interactive || needs || s.state === 'paused';
   const tag = $('s-tag');
   tag.className = 'tag' + (live ? ' live' : '');
-  tag.lastElementChild.textContent = !live ? 'Last screenshot' : s.in_front || driving ? 'Live' : 'Live · another tab in front';
+  tag.lastElementChild.textContent = !live ? 'Last screenshot' : s.in_front ? 'Live' : 'Live · another tab in front';
   showUrl(liveUrl(s) || s.url || 'about:blank', Boolean(s.tab) && !['working', 'waiting'].includes(s.state));
   $('live').hidden = !live;
   if (!live) $('s-keyboard').hidden = true;
   $('still').hidden = live || !s.shot_url;
   if (!live && s.shot_url && $('still').getAttribute('src') !== s.shot_url) $('still').src = s.shot_url;
   $('still').alt = `Last screenshot of ${title(s)}`;
-  $('s-still-bar').hidden = live || !s.url;
+  $('s-still-bar').hidden = live;
   $('s-focus').disabled = Boolean(busyElsewhere);
+  const inFront = status.front_tab ? siteOf(status.front_tab.url) || status.front_tab.url : 'Another tab';
   $('s-still-text').textContent = busyElsewhere
     ? `The browser is working on ${title(busyElsewhere)}. The live view comes back when it is done.`
+    : driving ? `${inFront} is in front. This is the run's last screenshot; it brings its tab back on its next step.`
     : 'Showing the last screenshot. Bring this tab to the front to see it live.';
   if (live) connectLive(!interactive);
 
