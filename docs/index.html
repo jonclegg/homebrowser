@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Stealthbox · a stealth browser for your AI agent</title>
+<meta name="description" content="A stealth browser for your AI agent. Websites treat it like a person's browser, it stays logged in, and it lives in a box on your own computer. Watch it, or take over from your phone.">
+<link rel="canonical" href="https://wooten-labs.com/stealthbox/">
+<link rel="icon" type="image/png" href="brand/favicon.png">
+<link rel="apple-touch-icon" href="brand/apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Stealthbox: a stealth browser for your AI agent">
+<meta property="og:description" content="Websites treat it like a person's browser. It stays logged in, runs in a box on your own computer, and you can watch it or take over from your phone.">
+<meta property="og:url" content="https://wooten-labs.com/stealthbox/">
+<meta property="og:image" content="https://wooten-labs.com/stealthbox/brand/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#0b1428">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;700;800&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* A night street, as in the film: deep navy sky, the logo's blue, one warm lamp. */
+  :root {
+    --night: #0b1428;
+    --night-2: #101c37;
+    --panel: #14223f;
+    --line: #243556;
+    --ink: #eef3ff;
+    --muted: #a3b2d1;
+    --blue: #2f6bff;
+    --blue-soft: #8fb0ff;
+    --lamp: #f6c453;
+    --display: "Plus Jakarta Sans", "Avenir Next", "Segoe UI", sans-serif;
+    --body: "Figtree", "Avenir Next", "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0; background: var(--night); color: var(--ink);
+    font: 17px/1.6 var(--body); -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue-soft); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--lamp); outline-offset: 3px; border-radius: 6px; }
+  img, video { max-width: 100%; display: block; }
+  .wrap { width: min(1160px, 100%); margin: 0 auto; padding-inline: 20px; }
+  h1, h2, h3 { font-family: var(--display); letter-spacing: -0.02em; text-wrap: balance; margin: 0; }
+  h2 { font-size: clamp(28px, 4vw, 40px); line-height: 1.12; font-weight: 800; }
+  h3 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+  p { margin: 0; }
+  .eyebrow { font: 600 13px/1 var(--body); letter-spacing: .14em; text-transform: uppercase; color: var(--lamp); }
+  .lede { color: var(--muted); font-size: 19px; max-width: 62ch; }
+
+  /* The wordmark: "Stealth" in ink, "box" in the logo's blue. */
+  .wordmark { font: 800 22px/1 var(--display); letter-spacing: -0.03em; color: var(--ink); }
+  .wordmark b { color: var(--blue); font-weight: 800; }
+
+  /* Nav */
+  .nav { position: sticky; top: 0; z-index: 20; backdrop-filter: blur(12px);
+         background: color-mix(in srgb, var(--night) 82%, transparent); border-bottom: 1px solid transparent; transition: border-color .2s; }
+  .nav.scrolled { border-bottom-color: var(--line); }
+  .nav .wrap { display: flex; align-items: center; gap: 28px; padding-block: 14px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; margin-right: auto; }
+  .brand img { width: 34px; height: 34px; }
+  .nav a.link { color: var(--muted); text-decoration: none; font-weight: 500; font-size: 15px; }
+  .nav a.link:hover { color: var(--ink); }
+  .btn { display: inline-flex; align-items: center; gap: 8px; border-radius: 10px; padding: 11px 18px;
+         font: 600 15px/1 var(--body); text-decoration: none; border: 1px solid var(--line); color: var(--ink); background: var(--panel); cursor: pointer; }
+  .btn:hover { border-color: var(--blue-soft); }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .btn.primary:hover { background: #4a7fff; }
+  .btn svg { width: 18px; height: 18px; }
+  @media (max-width: 760px) { .nav a.link { display: none; } }
+
+  /* Hero */
+  .hero { position: relative; overflow: hidden; padding-block: 64px 40px; }
+  .sky { position: absolute; inset: 0; pointer-events: none;
+         background: radial-gradient(1200px 520px at 78% -10%, #1d3570 0%, transparent 60%),
+                     radial-gradient(700px 380px at 8% 20%, #142a5c 0%, transparent 70%); }
+  .moon { position: absolute; right: 9%; top: 56px; width: 64px; height: 64px; border-radius: 50%;
+          box-shadow: 14px -8px 0 0 #f3e7c4; transform: rotate(-18deg); opacity: .9; }
+  .stars { position: absolute; inset: 0; background-image:
+           radial-gradient(1.4px 1.4px at 12% 18%, #fff8 50%, transparent 51%),
+           radial-gradient(1.2px 1.2px at 34% 9%, #fff6 50%, transparent 51%),
+           radial-gradient(1.6px 1.6px at 61% 22%, #fff9 50%, transparent 51%),
+           radial-gradient(1.2px 1.2px at 72% 6%, #fff6 50%, transparent 51%),
+           radial-gradient(1.4px 1.4px at 90% 30%, #fff7 50%, transparent 51%),
+           radial-gradient(1.2px 1.2px at 47% 30%, #fff5 50%, transparent 51%); }
+  .hero .wrap { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 48px; align-items: center; }
+  .hero h1 { font-size: clamp(40px, 6vw, 68px); line-height: 1.02; font-weight: 800; margin-block: 18px 22px; }
+  .hero h1 em { font-style: normal; color: var(--blue-soft); }
+  .hero .lede { margin-bottom: 28px; }
+  .ask { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: grid; gap: 10px; max-width: 520px; }
+  .ask small { color: var(--muted); font-size: 14px; }
+  .ask-row { display: flex; gap: 10px; align-items: stretch; }
+  .ask code { flex: 1; min-width: 0; font: 14px/1.45 var(--mono); color: var(--ink); background: var(--night); border: 1px solid var(--line);
+              border-radius: 9px; padding: 11px 12px; overflow-wrap: anywhere; }
+  .ctas { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+  @media (max-width: 900px) { .hero .wrap { grid-template-columns: 1fr; } .moon { display: none; } }
+
+  /* Video frames */
+  .film { position: relative; border-radius: 18px; overflow: hidden; border: 1px solid var(--line);
+          box-shadow: 0 30px 80px -30px #000c, 0 0 0 6px #ffffff08; background: #000; aspect-ratio: 16 / 9; }
+  .film video { width: 100%; height: 100%; object-fit: cover; }
+  .film .play { position: absolute; left: 16px; bottom: 16px; }
+  .browser { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: #0a1122; box-shadow: 0 30px 80px -30px #000c; }
+  .browser .bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: #0e1830; }
+  .browser .dots { display: flex; gap: 6px; } .browser .dots i { width: 10px; height: 10px; border-radius: 50%; background: #ff5f57; }
+  .browser .dots i:nth-child(2) { background: #febc2e; } .browser .dots i:nth-child(3) { background: #28c840; }
+  .browser .addr { flex: 1; min-width: 0; text-align: center; color: var(--muted); font: 13px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .browser video, .browser img { width: 100%; height: auto; }
+
+  section { padding-block: 72px; }
+  .head { display: grid; gap: 14px; margin-bottom: 36px; }
+
+  /* Real run */
+  .real { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 36px; align-items: start; }
+  .transcript { display: grid; gap: 14px; }
+  .bubble { border-radius: 14px; padding: 12px 15px; font-size: 15px; }
+  .bubble.you { background: var(--blue); color: #fff; justify-self: end; max-width: 92%; }
+  .bubble.reply { background: var(--panel); border: 1px solid var(--line); }
+  .steps { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); display: grid; gap: 10px; font-size: 14.5px; color: var(--muted); }
+  .steps b { color: var(--ink); font-weight: 600; }
+  .note { color: var(--muted); font-size: 14px; }
+  @media (max-width: 900px) { .real { grid-template-columns: 1fr; } }
+
+  /* Examples */
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+  .card { background: var(--night-2); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; display: flex; flex-direction: column; }
+  .card img { border-bottom: 1px solid var(--line); cursor: zoom-in; }
+  .card .text { padding: 18px 20px 22px; display: grid; gap: 8px; }
+  .card .ask-text { font-style: italic; color: var(--ink); }
+  .card .did { color: var(--muted); font-size: 15px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  /* How it works */
+  .how { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+  .how .item { background: var(--night-2); border: 1px solid var(--line); border-radius: 16px; padding: 22px; display: grid; gap: 10px; align-content: start; }
+  .how .icon { width: 42px; height: 42px; border-radius: 11px; display: grid; place-items: center; background: #2f6bff22; color: var(--blue-soft); }
+  .how .icon svg { width: 22px; height: 22px; }
+  .how p { color: var(--muted); font-size: 15.5px; }
+  @media (max-width: 1000px) { .how { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .how { grid-template-columns: 1fr; } }
+
+  /* Watch it, or step in */
+  .stepin { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 36px; align-items: center; }
+  .stepin ul { margin: 0; padding-left: 20px; display: grid; gap: 8px; color: var(--muted); }
+  .stepin ul b { color: var(--ink); }
+  @media (max-width: 900px) { .stepin { grid-template-columns: 1fr; } }
+
+  /* Install */
+  .install { background: linear-gradient(180deg, var(--night-2), var(--night)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .install-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: start; }
+  ol.setup { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 16px; }
+  ol.setup li { counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 12px; color: var(--muted); }
+  ol.setup li::before { content: counter(s); width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+                        background: var(--panel); border: 1px solid var(--line); color: var(--lamp); font: 700 14px var(--display); }
+  ol.setup b { color: var(--ink); }
+  @media (max-width: 900px) { .install-grid { grid-template-columns: 1fr; } }
+
+  /* FAQ */
+  .faq { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 32px; }
+  .faq div { display: grid; gap: 6px; padding-block: 6px; }
+  .faq p { color: var(--muted); font-size: 15.5px; }
+  @media (max-width: 760px) { .faq { grid-template-columns: 1fr; } }
+
+  footer { padding-block: 40px 56px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; justify-content: space-between; }
+
+  /* Picture viewer */
+  dialog { border: 0; padding: 0; background: transparent; max-width: min(1400px, 96vw); }
+  dialog::backdrop { background: #050a15e8; }
+  dialog img { border-radius: 12px; }
+
+  .copied { color: var(--lamp); font-size: 13px; min-height: 1em; }
+  .reveal { opacity: 1; transform: none; transition: opacity .6s ease, transform .6s ease; }
+  .js .reveal.pending { opacity: 0; transform: translateY(14px); }
+  @media (prefers-reduced-motion: reduce) { .js .reveal.pending { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="brand/stealthbox-icon-256.png" alt=""><span class="wordmark">Stealth<b>box</b></span></a>
+    <a class="link" href="#real">See it work</a>
+    <a class="link" href="#examples">What it does</a>
+    <a class="link" href="#how">How it works</a>
+    <a class="btn" href="https://github.com/jonclegg/stealthbox">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.7 5.4-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>
+      GitHub</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="sky" aria-hidden="true"><div class="stars"></div><div class="moon"></div></div>
+  <div class="wrap">
+    <div>
+      <span class="eyebrow">Open source · runs on your computer</span>
+      <h1>The stealth browser for your <em>AI agent</em>.</h1>
+      <p class="lede">Websites treat it like a person's browser, and it stays logged in. It lives in a box (a Docker container) on your own computer, and you can watch it work or take over from your phone.</p>
+      <div class="ask">
+        <small>Tell your agent (Claude Code, Codex, Cursor, Grok, and so on):</small>
+        <div class="ask-row">
+          <code id="install-line">Install Stealthbox from https://github.com/jonclegg/stealthbox</code>
+          <button class="btn" type="button" id="copy" aria-describedby="copied">Copy</button>
+        </div>
+        <span class="copied" id="copied" aria-live="polite"></span>
+      </div>
+      <div class="ctas">
+        <a class="btn primary" href="#real">See it work on a real site</a>
+        <a class="btn" href="https://github.com/jonclegg/stealthbox#readme">Read the README</a>
+      </div>
+    </div>
+    <div class="film reveal" id="film">
+      <video id="promo" src="media/stealthbox-promo.mp4" poster="media/stealthbox-promo-poster.jpg" playsinline muted loop preload="metadata" aria-label="A short animated film: a helper robot is turned away by a shop until it hides inside a Stealthbox"></video>
+      <button class="btn play" type="button" id="sound">Play with sound</button>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<section id="real">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">A real run, not a mock-up</span>
+      <h2>One sentence in, the answer out.</h2>
+      <p class="lede">This is the Stealthbox console recording a real run on a city library's website. It types the request, enters the site from a search the way a person would, finds the branch page, and reads the hours. Sped up 2.5×, otherwise unedited.</p>
+    </div>
+    <div class="real">
+      <div class="browser reveal">
+        <div class="bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="addr">Stealthbox console</span></div>
+        <video poster="media/real-run-poster.jpg" playsinline muted loop autoplay preload="metadata" aria-label="Recording of the Stealthbox console finding today's hours at a city library">
+          <source src="media/real-run.webm" type="video/webm">
+          <source src="media/real-run.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="transcript reveal">
+        <div class="bubble you">Find today's opening hours for the Central Library on the Austin Public Library website.</div>
+        <ol class="steps">
+          <li><b>Opens the site from Bing,</b> like a person, instead of jumping straight to a URL.</li>
+          <li><b>Finds Locations</b> in the library's menu, then the Central Library page.</li>
+          <li><b>Reads the page</b> for today's hours and the address.</li>
+        </ol>
+        <div class="bubble reply">Central Library (710 W. César Chávez St.) is open today, Wednesday, from 9:00 AM to 8:00 PM.</div>
+        <p class="note">Every step comes with the reason it took it, and you can open the model's reasoning in the console.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="examples">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">What you can hand it</span>
+      <h2>Errands that eat an evening.</h2>
+      <p class="lede">Ask your agent to do things on websites "with Stealthbox". These show the real console with made-up sites in it.</p>
+    </div>
+    <div class="grid">
+      <figure class="card reveal" style="margin:0">
+        <img src="images/console-training.jpg" alt="The console waiting for a training video to finish before the Next lesson button unlocks" loading="lazy">
+        <figcaption class="text"><h3>Training</h3><p class="ask-text">"Work through my assigned compliance course. Stop when you reach a quiz."</p><p class="did">Follows the course player into its pop-up and waits out each video until Next unlocks. The quiz is yours.</p></figcaption>
+      </figure>
+      <figure class="card reveal" style="margin:0">
+        <img src="images/console-motorly.jpg" alt="The console after a finished run on a used car listings site" loading="lazy">
+        <figcaption class="text"><h3>Shopping around</h3><p class="ask-text">"Find used electric cars under $30,000 within 50 miles and save the photos of each."</p><p class="did">9 listings, 214 photos saved, with a summary of each car.</p></figcaption>
+      </figure>
+      <figure class="card reveal" style="margin:0">
+        <img src="images/console-brightside.jpg" alt="The console after booking a dental cleaning" loading="lazy">
+        <figcaption class="text"><h3>Appointments</h3><p class="ask-text">"Book my next cleaning on the earliest Tuesday morning."</p><p class="did">Booked Tuesday, November 3 at 8:30 am.</p></figcaption>
+      </figure>
+      <figure class="card reveal" style="margin:0">
+        <img src="images/console-maple.jpg" alt="The console after renewing library books" loading="lazy">
+        <figcaption class="text"><h3>Errands</h3><p class="ask-text">"Renew my library books that are due this week."</p><p class="did">Renewed 3 of 4, and says why the fourth couldn't be.</p></figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="eyebrow">How it works</span>
+      <h2>A browser with a home of its own.</h2>
+    </div>
+    <div class="how">
+      <div class="item reveal">
+        <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg></span>
+        <h3>It lives in a box</h3>
+        <p>A Docker container on your Mac, Linux or Windows computer. Its traffic leaves from your own connection, and its profile keeps your logins between runs.</p>
+      </div>
+      <div class="item reveal">
+        <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 10c0-2 2-4 5-4 2 0 3 1 4 2 1-1 2-2 4-2 3 0 5 2 5 4 0 3-3 5-5 5-2 0-3-1-4-2-1 1-2 2-4 2-2 0-5-2-5-5z"/><circle cx="8" cy="10.5" r="1.4"/><circle cx="16" cy="10.5" r="1.4"/></svg></span>
+        <h3>It wears a face</h3>
+        <p>Chromium with Fury's fingerprint patches. Each box keeps one consistent persona, so a site sees the same person every visit.</p>
+      </div>
+      <div class="item reveal">
+        <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16v10H8l-4 4z"/><path d="M8 9h8M8 12h5"/></svg></span>
+        <h3>It drives itself</h3>
+        <p>Your agent sends a goal in plain words. Stealthbox looks at the screen, picks each step with DeepSeek, and moves a real mouse and keyboard. Or drive it yourself over CDP.</p>
+      </div>
+      <div class="item reveal">
+        <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg></span>
+        <h3>You step in</h3>
+        <p>When a site needs you, like a sign-in, it stops and sends you a private link. Sign in from your phone, tap Done, and it carries on.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="console">
+  <div class="wrap stepin">
+    <img class="browser reveal" src="images/console-northgate.jpg" alt="The console asking you to sign in to a utility company's site, with a Done, carry on button" loading="lazy" style="cursor:zoom-in">
+    <div class="reveal" style="display:grid;gap:16px">
+      <span class="eyebrow">The console</span>
+      <h2>Watch it, or take the wheel.</h2>
+      <p class="lede">A private link behind a password you choose, from your phone or any computer.</p>
+      <ul>
+        <li><b>Every session</b> and what it's doing right now, with the reason for each step.</li>
+        <li><b>The live browser:</b> type an address, or take over the mouse.</li>
+        <li><b>Sign in yourself,</b> then tap Done, carry on. Passwords never go in a chat.</li>
+        <li><b>Message a session,</b> or stop it.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="install" id="install">
+  <div class="wrap install-grid">
+    <div class="reveal" style="display:grid;gap:16px">
+      <span class="eyebrow">Install</span>
+      <h2>One sentence to your agent.</h2>
+      <p class="lede">Paste this into Claude Code, Codex, Cursor, Grok or any coding agent:</p>
+      <div class="ask" style="max-width:none">
+        <div class="ask-row"><code>Install Stealthbox from https://github.com/jonclegg/stealthbox</code></div>
+      </div>
+    </div>
+    <ol class="setup reveal">
+      <li><div><b>It installs Stealthbox</b> on your Mac, Linux or Windows computer.</div></li>
+      <li><div><b>It asks before installing Docker,</b> if your computer doesn't have it yet.</div></li>
+      <li><div><b>It opens a page for your OpenRouter key.</b> You paste the key there, on your own computer, never into the chat, and choose the console password.</div></li>
+      <li><div><b>It proves it works</b> on two or three sites you use, with a screenshot of each.</div></li>
+    </ol>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <div class="head reveal"><span class="eyebrow">Questions</span><h2>Good to know</h2></div>
+    <div class="faq reveal">
+      <div><h3>What does it cost?</h3><p>Stealthbox is free and MIT licensed. Its driver uses DeepSeek through your own OpenRouter key; the library run above cost under a cent.</p></div>
+      <div><h3>Does anything leave my computer?</h3><p>The browser runs in a container on your machine and browses from your connection. Nothing is reachable from outside unless you share the console, which asks for your password.</p></div>
+      <div><h3>Can I run more than one?</h3><p>Each box is one browser with one persona and its own saved logins. Run another box for another identity.</p></div>
+      <div><h3>Which agents work with it?</h3><p>Any agent that can run a command: it sends goals with <code style="font:14px var(--mono)">stealthbox chat</code>, or drives the browser itself over CDP.</p></div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="brand" style="margin:0"><img src="brand/stealthbox-icon-256.png" alt="" style="width:26px;height:26px"><span class="wordmark" style="font-size:18px">Stealth<b>box</b></span></span>
+    <span>MIT licensed · <a href="https://github.com/jonclegg/stealthbox">GitHub</a> · A <a href="/">Wooten Labs</a> project</span>
+    <span>Not affiliated with any website it visits. The shops in the examples are made up.</span>
+  </div>
+</footer>
+
+<dialog id="viewer" aria-label="Picture"><img id="viewer-img" alt=""></dialog>
+
+<script>
+  document.documentElement.classList.add('js');
+  const nav = document.getElementById('nav');
+  addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 8), { passive: true });
+
+  // Sections fade up as they arrive; everything is visible without script or with reduced motion.
+  const pending = [...document.querySelectorAll('.reveal')].filter((el) => el.getBoundingClientRect().top > innerHeight);
+  pending.forEach((el) => el.classList.add('pending'));
+  const seen = new IntersectionObserver((entries) => entries.forEach((entry) => {
+    if (entry.isIntersecting) { entry.target.classList.remove('pending'); seen.unobserve(entry.target); }
+  }), { rootMargin: '0px 0px -8% 0px' });
+  pending.forEach((el) => seen.observe(el));
+
+  // The film plays muted on its own; the button restarts it with sound.
+  const promo = document.getElementById('promo');
+  const quiet = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!quiet) promo.play().catch(() => {});
+  document.getElementById('sound').addEventListener('click', (event) => {
+    promo.muted = !promo.muted;
+    if (!promo.muted) { promo.currentTime = 0; promo.play(); }
+    event.currentTarget.textContent = promo.muted ? 'Play with sound' : 'Mute';
+  });
+
+  document.getElementById('copy').addEventListener('click', () => {
+    const text = document.getElementById('install-line').textContent;
+    const done = (message) => { document.getElementById('copied').textContent = message; };
+    navigator.clipboard.writeText(text).then(() => done('Copied. Paste it to your agent.'), () => {
+      const range = document.createRange(); range.selectNodeContents(document.getElementById('install-line'));
+      getSelection().removeAllRanges(); getSelection().addRange(range); done('Selected. Press Copy on your keyboard.');
+    });
+  });
+
+  // Console pictures open full size.
+  const viewer = document.getElementById('viewer');
+  document.querySelectorAll('.card img, #console img').forEach((img) => img.addEventListener('click', () => {
+    document.getElementById('viewer-img').src = img.src; document.getElementById('viewer-img').alt = img.alt; viewer.showModal();
+  }));
+  viewer.addEventListener('click', () => viewer.close());
+</script>
+</body>
+</html>
