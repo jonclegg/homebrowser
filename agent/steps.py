@@ -369,6 +369,13 @@ def activate_tab(target_id):
         _command(socket, 1, "Target.activateTarget", {"targetId": target_id})
 
 
+def open_tab(background):
+    """Open a blank tab from the browser side, without Playwright: the server's browser
+    thread may be busy with a run. In the background it leaves the run's tab in front."""
+    with _browser_socket() as socket:
+        return _command(socket, 1, "Target.createTarget", {"url": "about:blank", "background": background})["targetId"]
+
+
 def close_target(target_id):
     """Close a tab from the browser side, which works even when its renderer is hung."""
     with _browser_socket() as socket:

@@ -531,21 +531,24 @@ class Stealthbox:
         return session.page
 
     def open_blank(self):
-        """A session with no task yet: a new tab, brought to the front once the run in
-        progress (if any) is done with the mouse, for the user to browse or message later."""
+        """A session with no task yet, for the user to browse or message later. Its tab
+        opens at once; while a run has the mouse it waits behind that run's tab, and
+        comes to the front when the browser thread is free."""
         session = Session()
+        session.target_id = agent.open_tab(background=self.current is not None)
         with self.lock:
             self.sessions[session.id] = session
         self.events.publish("session.created", session=session.id)
+        self.events.publish("session.tab_opened", session=session.id, tab=session.target_id)
 
         def chore(context):
             if session.id not in self.sessions:
                 # Closed before the worker got to it.
                 return
-            session.page = context.new_page()
+            # A tab opened outside Playwright reaches it a moment later.
+            session.page = self._borrowed_page(context, session.target_id)
             session.page.bring_to_front()
-            session.target_id = agent.humanize.target_id(session.page)
-            self.events.publish("session.tab_opened", session=session.id, tab=session.target_id)
+            self.events.publish("session.focused", session=session.id)
         self.queue.put(chore)
         return session
 
@@ -803,7 +806,8 @@ class Stealthbox:
         if session.page is None and session.borrowed:
             session.page = self._borrowed_page(context, session.target_id)
         if session.page is None or session.page.is_closed():
-            session.page = context.new_page()
+            # Its own tab if it is still open (the browser reconnected since), else a new one.
+            session.page = self._session_page(context, session) or context.new_page()
         page = session.page
         try:
             page.bring_to_front()
