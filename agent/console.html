@@ -467,7 +467,8 @@ import RFB from '/viewer/core/rfb.js';
 // The entry for the browser itself, beside the sessions: it shows whatever tab is in front.
 const BROWSER = 'browser';
 const STATE_LABEL = { live: 'Live', new: 'New', needs: 'Needs you', working: 'Working', paused: 'Paused · you have the mouse', waiting: 'Waiting its turn', done: 'Finished', stopped: 'Stopped' };
-const GROUPS = [['Needs you', ['needs']], ['In progress', ['working', 'paused', 'waiting', 'new']], ['Earlier', ['done', 'stopped']]];
+// Open tabs: tabs you can message that have no run yet, a blank session's or the tab in front that no session owns.
+const GROUPS = [['Needs you', ['needs']], ['Working', ['working', 'paused', 'waiting']], ['Open tabs', ['new']], ['Earlier', ['done', 'stopped']]];
 const X_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
 const RESTORE_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
 const CHEVRON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
@@ -659,7 +660,7 @@ function browserRow() {
   fillRow(el, {
     key: BROWSER, testid: 'browser-item', state: 'live',
     site: tab ? siteOf(tab.url) || tab.url : 'Browser',
-    msg: tab ? tab.title || tab.url : 'No tab open', quiet: !tab,
+    msg: tab ? 'Not a session yet' : 'No tab open', quiet: true,
     action: 'closeTab', icon: 'x', label: 'Close tab', actionTestid: 'close-tab', actionValue: tab ? tab.id : '',
   });
   // With no tab there is nothing to close.
@@ -673,7 +674,7 @@ function sessionRow(s) {
   const shot = s.in_front ? livePreview().getAttribute('src') : s.shot_url;
   fillRow(el, {
     key: s.session, testid: 'session-item', state: s.state, shot,
-    site: title(s), msg: lastAsk(s) || 'No messages yet', quiet: !lastAsk(s),
+    site: title(s), msg: lastAsk(s) || 'Blank tab · no messages', quiet: !lastAsk(s),
     action: s.archived ? 'unarchive' : 'archive', icon: s.archived ? 'restore' : 'x',
     label: s.archived ? 'Unarchive' : 'Archive', actionTestid: s.archived ? 'unarchive-session' : 'archive-session',
     actionValue: s.session,
@@ -688,11 +689,13 @@ function renderList() {
   if (!archived.length) archiveOpen = false;
   for (const key of rows.keys()) if (key !== BROWSER && !sessions.some((s) => s.session === key)) rows.delete(key);
   const nodes = [];
-  if (!frontOwner()) nodes.push(heading('Browser'), browserRow());
-  if (!open.length) nodes.push(emptyList);
+  // The tab in front that no session owns is one more open tab, not a section of its own.
+  const unowned = frontOwner() ? [] : [browserRow()];
+  if (!open.length && !unowned.length) nodes.push(emptyList);
   for (const [name, states] of GROUPS) {
-    const members = open.filter((s) => states.includes(s.state));
-    if (members.length) nodes.push(heading(name), ...members.map(sessionRow));
+    const members = open.filter((s) => states.includes(s.state)).map(sessionRow);
+    if (name === 'Open tabs') members.unshift(...unowned);
+    if (members.length) nodes.push(heading(name), ...members);
   }
   if (archived.length) {
     const toggle = archiveSection.firstElementChild;
