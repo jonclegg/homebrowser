@@ -811,7 +811,7 @@ class Stealthbox:
         wait on the next new page for a while before calling it gone."""
         deadline = time.time() + BORROW_SECONDS
         while True:
-            page = next((item for item in context.pages if agent.humanize.target_id(item) == target_id), None)
+            page = next((item for item in context.pages if self._target_of(item) == target_id), None)
             if page is not None:
                 return page
             if time.time() > deadline:
@@ -820,6 +820,17 @@ class Stealthbox:
                 context.wait_for_event("page", timeout=500)
             except PlaywrightError:
                 pass
+
+    @staticmethod
+    def _target_of(page):
+        """The page's target id, or None for a tab that closed while the list was read
+        (the browser is shared: a run or the user closes tabs at any moment)."""
+        if page.is_closed():
+            return None
+        try:
+            return agent.humanize.target_id(page)
+        except PlaywrightError:
+            return None
 
     def _run(self, playwright, run):
         if run.cancel_requested:

@@ -424,7 +424,7 @@ def archive_from_the_list(page, session):
 def test_a_blank_session_opens_a_new_tab_to_browse_with_no_task(page):
     session = open_blank_session(page)
     expect(list_item(page, session)).to_have_attribute("data-state", "new")
-    expect(list_item(page, session)).to_contain_text("No messages yet")
+    expect(list_item(page, session)).to_contain_text("Blank tab · no messages")
     expect(status(page)).to_have_text("New")
     expect(page.get_by_test_id("session-title")).to_have_text("New session")
     expect(page.get_by_test_id("blank-hint")).to_be_visible()
