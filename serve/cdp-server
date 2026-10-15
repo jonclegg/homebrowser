@@ -994,12 +994,25 @@ async def handle_root(request: web.Request) -> web.Response:
     })
 
 
+def _host_is_loopback(host: str | None) -> bool:
+    hostname = urlparse(f"//{host or ''}").hostname or ""
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 async def handle_history(request: web.Request) -> web.Response:
     """Addresses from the default identity's history for an address bar: GET /history?q=.
 
     Chrome keeps its profile to the user it runs as (mode 700); a caller running
-    as another user asks here.
+    as another user asks here. Loopback names only: a page that rebinds its own
+    name to this machine must not read the history.
     """
+    if not _host_is_loopback(request.headers.get("Host")):
+        return web.json_response({"error": "history answers loopback callers only"}, status=403)
     pool: ChromePool = request.app["pool"]
     profile = os.path.join(pool._data_dir, pool.default_key)
     found = await asyncio.to_thread(history.suggestions, profile, request.query.get("q", ""))

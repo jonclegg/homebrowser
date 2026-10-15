@@ -900,10 +900,19 @@ class TestHistory:
         database.close()
         pool = ChromePool(binary="chrome", global_args=[], headless=True, data_dir=str(tmp_path),
                           default_seed=default_seed)
-        request = SimpleNamespace(app={"pool": pool}, query={"q": "git"})
+        request = SimpleNamespace(app={"pool": pool}, query={"q": "git"}, headers={"Host": "127.0.0.1:9222"})
 
         response = asyncio.run(_mod.handle_history(request))
 
         assert json.loads(response.text) == {"suggestions": [
             {"url": "https://github.com/notifications", "address": "github.com/notifications",
              "title": "Notifications"}]}
+
+    @pytest.mark.parametrize("host", ["attacker.example:9222", "stealthbox:9222", "", "10.0.0.5:9222"])
+    def test_answers_loopback_callers_only(self, host):
+        request = SimpleNamespace(app={}, query={"q": "git"}, headers={"Host": host})
+        assert asyncio.run(_mod.handle_history(request)).status == 403
+
+    @pytest.mark.parametrize("host", ["127.0.0.1:9222", "localhost:9222", "[::1]:9222"])
+    def test_loopback_hosts_are_allowed(self, host):
+        assert _mod._host_is_loopback(host)

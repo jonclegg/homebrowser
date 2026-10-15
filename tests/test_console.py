@@ -138,7 +138,6 @@ def page(browser, link):
     page.on("requestfailed", lambda request: request.failure != "net::ERR_ABORTED" and failed.append(
         f"{request.method} {request.url} -> {request.failure}"))
     yield page
-    assert not failed, f"requests the server failed: {failed}"
     # Stop and close what this test opened, so the next one starts from the same list:
     # a run a failed test left going (or paused) holds the one browser worker.
     opened = [s["session"] for s in context.request.get(base + "/v1/sessions").json()["sessions"]
@@ -151,6 +150,8 @@ def page(browser, link):
             time.sleep(2)
         context.request.post(f"{base}/v1/sessions/{session}/close")
     context.close()
+    # After the cleanup, so a failure here does not leave runs holding the browser for the next test.
+    assert not failed, f"requests the server failed: {failed}"
 
 
 def start_session(page, message):
@@ -636,6 +637,22 @@ def test_the_live_browser_view_follows_a_program_driving_the_browser_over_cdp(br
     finally:
         tab.close()
         driver.close()
+
+
+def test_show_it_live_on_a_session_whose_tab_was_closed_says_so(browser, page):
+    """A tab closed outside the console (in the viewer, or by another program) is gone;
+    bringing it to the front used to answer yes and show nothing."""
+    session = open_blank_session(page)
+    tab = api_get(page, f"/v1/sessions/{session}")["tab"]
+    driver = browser.browser_type.connect_over_cdp(CDP_URL or json.loads(stealthbox("status", "--json"))["cdp_url"])
+    try:
+        cdp = driver.new_browser_cdp_session()
+        cdp.send("Target.closeTarget", {"targetId": tab})
+    finally:
+        driver.close()
+    base = page.url.split("/console")[0]
+    response = page.request.post(f"{base}/v1/sessions/{session}/focus", headers={"Origin": base})
+    assert response.status == 404 and "tab was closed" in response.json()["error"], response.text()
 
 
 def front_tab_url(page):

@@ -295,6 +295,12 @@ def page_url(page):
         session.detach()
 
 
+def page_targets():
+    """The open tabs, as Chrome lists them (most recently active first within a window)."""
+    with urllib.request.urlopen(f"{humanize.CDP_URL}/json/list", timeout=5) as response:
+        return [target for target in json.load(response) if target["type"] == "page"]
+
+
 def front_tab():
     """The tab in front, as {"id", "url", "title"}, or None with no tab open.
 
@@ -305,8 +311,7 @@ def front_tab():
     breaks ties. A page with no title (Chrome names the window after its address)
     matches no title, and then the order alone decides.
     """
-    with urllib.request.urlopen(f"{humanize.CDP_URL}/json/list", timeout=5) as response:
-        tabs = [target for target in json.load(response) if target["type"] == "page"]
+    tabs = page_targets()
     if not tabs:
         return None
     window = subprocess.run(["xdotool", "getactivewindow", "getwindowname"],

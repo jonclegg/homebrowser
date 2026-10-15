@@ -32,8 +32,17 @@ x11vnc -display :99 -forever -shared -nopw -localhost -rfbport 5900 -quiet -bg -
 websockify --web /usr/share/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
 
 # The chat API. It connects to the browser over loopback on first use, so it can
-# start before Chrome is up. The health check covers it, so a crash shows.
-python -u /opt/stealthbox/agent/server.py &
+# start before Chrome is up. If it dies, it starts again: once it aborted in native
+# code (heap corruption, cause not found), and the container stayed up with no API
+# until someone restarted it. faulthandler prints every thread's stack when that happens.
+run_api() {
+  while true; do
+    python -X faulthandler -u /opt/stealthbox/agent/server.py \
+      || echo "stealthbox api exited with status $?; starting it again" >&2
+    sleep 2
+  done
+}
+run_api &
 
 # --geoip sets the browser's timezone and locale from the egress IP (the proxy's,
 # when one is set), so the clock always matches where the traffic comes from.
