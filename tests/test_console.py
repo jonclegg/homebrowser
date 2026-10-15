@@ -16,6 +16,10 @@ share link (then run only the tests that do not need the share, with -k). The te
 they signed in. They start a share (`stealthbox share --json`), and the last one
 stops and restarts it, which signs out the devices that used the old link.
 
+Run them on a Linux host too (with STEALTHBOX_CONSOLE_URL over an SSH tunnel, say).
+There the API runs as the data folder's owner while Chrome runs as root, and the
+address bar's history once failed only there; on a Mac host both run as root.
+
 Every trycloudflare.com name is served from the same Cloudflare addresses, so the
 test browser resolves them through public DNS: a resolver that was asked about a
 new name too early (macOS caches the "no such name" for a while) would otherwise
@@ -28,7 +32,10 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
+import urllib.error
+import urllib.request
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -122,7 +129,16 @@ def page(browser, link):
     sign_in(page, link)
     base = link.split("/console")[0]
     before = {s["session"] for s in context.request.get(base + "/v1/sessions").json()["sessions"]}
+    # Whatever a test does, the console's own requests never fail on the server's side:
+    # through the share, a handler that broke reached the user as a bare "502".
+    failed = []
+    page.on("response", lambda response: response.status >= 500 and "x-test-fault" not in response.headers
+            and failed.append(f"{response.request.method} {response.url} -> {response.status}"))
+    # A connection dropped without an answer (aborted ones are the page's or a test's doing).
+    page.on("requestfailed", lambda request: request.failure != "net::ERR_ABORTED" and failed.append(
+        f"{request.method} {request.url} -> {request.failure}"))
     yield page
+    assert not failed, f"requests the server failed: {failed}"
     # Stop and close what this test opened, so the next one starts from the same list:
     # a run a failed test left going (or paused) holds the one browser worker.
     opened = [s["session"] for s in context.request.get(base + "/v1/sessions").json()["sessions"]
@@ -204,7 +220,8 @@ def test_the_console_asks_for_the_password_and_keeps_the_device_30_days(browser,
     expect(page.get_by_test_id("events-state")).to_have_text("Live updates on", timeout=30000)
     assert page.request.get(base + "/v1/sessions").status == 200
     cookie = next(c for c in context.cookies() if c["name"] == "stealthbox_console")
-    assert cookie["httpOnly"] and cookie["secure"] and cookie["sameSite"] == "Lax"
+    # Secure only through the HTTPS share: a browser drops a Secure cookie on plain http.
+    assert cookie["httpOnly"] and cookie["secure"] == link.startswith("https:") and cookie["sameSite"] == "Lax"
     assert abs(cookie["expires"] - time.time() - 30 * 24 * 3600) < 600
 
     # Another site's page cannot use the cookie.
@@ -242,7 +259,7 @@ def test_signing_out_another_device_sends_it_back_to_sign_in(browser, link):
 
 
 def test_new_session_runs_to_a_reply_with_steps_and_a_live_view(page):
-    session = start_session(page, "Open example.com and tell me the page's main heading.")
+    session = start_session(page, "Open example.com and tell me the page's title.")
     expect(list_item(page, session)).to_be_visible()
     expect(status(page)).to_have_text(re.compile("Waiting its turn|Working"), timeout=30000)
 
@@ -286,7 +303,7 @@ def test_new_session_runs_to_a_reply_with_steps_and_a_live_view(page):
 
 
 def test_a_follow_up_queues_behind_the_run_and_stays_in_the_same_tab(page):
-    session = start_session(page, "Open example.com and tell me the page's main heading.")
+    session = start_session(page, "Open example.com and tell me the page's title.")
     expect(status(page)).to_have_text(re.compile("Waiting its turn|Working"), timeout=30000)
     page.get_by_test_id("reply").fill("What does the one link on that page say?")
     page.get_by_test_id("send").click()
@@ -406,6 +423,48 @@ def test_a_blank_session_opens_a_new_tab_to_browse_with_no_task(page):
     expect(list_item(page, session)).to_have_count(0)
 
 
+def test_typing_in_a_blank_sessions_address_bar_suggests_without_an_error(page):
+    """The Dell's 502: on a Linux host the API could not read Chrome's history, and
+    every keystroke in the address bar put a bare "502" over the session."""
+    open_in_browser_view(page, "example.org")
+    expect(page.get_by_test_id("url")).to_have_value(re.compile(r"^https://example\.org/?$"), timeout=15000)
+    session = open_blank_session(page)
+    expect(page.get_by_test_id("live-view")).to_have_attribute("data-view-only", "false", timeout=15000)
+    url = page.get_by_test_id("url")
+    url.click()
+    url.press("ControlOrMeta+a")
+    with page.expect_request(lambda request: "/v1/browser/history" in request.url) as sent:
+        url.type("goo", delay=60)
+    answer = sent.value.response()
+    assert answer is not None, f"no answer: {sent.value.failure}"
+    assert answer.status == 200, answer.text()
+    assert isinstance(answer.json()["suggestions"], list)
+    page.wait_for_timeout(1000)
+    expect(page.get_by_test_id("error")).to_be_hidden()
+    expect(list_item(page, session)).to_have_attribute("data-state", "new")
+
+
+def test_a_request_that_fails_on_the_server_says_what_failed(page):
+    """A handler that raises answers 500 with its error, and a bad body 400, instead of
+    dropping the connection (which the share turns into Cloudflare's bare 502)."""
+    base = page.url.split("/console")[0]
+    for path, code in (("/v1/browser/screenshot?width=wide", 400), ("/v1/sessions/not-a-session", 404)):
+        response = page.request.get(base + path)
+        assert response.status == code and response.json()["error"], f"{path}: {response.status} {response.text()}"
+    for path, body, error in (
+            ("/v1/browser/navigate", b"{not json", "not JSON"),
+            ("/v1/browser/navigate", b'["a list"]', "JSON object"),
+            ("/v1/browser/navigate", b'{"url": ["example.com"]}', "url must be text"),
+            ("/v1/browser/navigate", b'{"url": "example.com", "session": 7}', "session must be text"),
+            ("/v1/chat", b'{"message": 5}', "message must be text"),
+            ("/v1/chat", b'{"message": "hi", "max_stuck_steps": "abc", "wait": false}', "max_stuck_steps"),
+            ("/v1/chat", b'{"message": "hi", "max_stuck_steps": -3, "wait": false}', "max_stuck_steps"),
+            ("/v1/chat", b'{"message": "hi", "session": ["s_1"], "wait": false}', "session must be text")):
+        response = page.request.post(base + path, data=body,
+                                     headers={"Content-Type": "application/json", "Origin": base})
+        assert response.status == 400 and error in response.json()["error"], f"{path} {body}: {response.text()}"
+
+
 def test_the_x_archives_a_session_into_a_closed_archive_at_the_bottom_and_restore_brings_it_back(page):
     first = open_blank_session(page)
     second = open_blank_session(page)
@@ -477,7 +536,7 @@ def test_a_message_to_an_archived_session_brings_it_back(page):
     archive_from_the_list(page, session)
     archive_toggle(page).click()
     list_item(page, session).click()
-    page.get_by_test_id("reply").fill("Open example.com and tell me the page's main heading.")
+    page.get_by_test_id("reply").fill("Open example.com and tell me the page's title.")
     page.get_by_test_id("send").click()
     expect(archive_toggle(page)).to_have_count(0)
     expect(list_item(page, session)).to_be_visible()
@@ -536,9 +595,9 @@ def test_a_sign_in_hands_off_with_a_session_link_that_opens_anywhere(browser, pa
 
 
 def test_show_it_live_brings_a_background_session_to_the_front_and_close_forgets_it(page):
-    first = start_session(page, "Open example.com and tell me the page's main heading.")
+    first = start_session(page, "Open example.com and tell me the page's title.")
     expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
-    second = start_session(page, "Open example.org and tell me the page's main heading.")
+    second = start_session(page, "Open example.org and tell me the page's title.")
     expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
 
     list_item(page, first).click()
@@ -600,7 +659,11 @@ def test_the_address_bar_opens_what_is_typed_in_the_tab_in_front(page):
     url.type("stealthbox address bar")
     url.press("Enter")
     expect(url).to_have_value(re.compile(r"^https://www\.bing\.com/search\?q=stealthbox"), timeout=15000)
-    assert front_tab_url(page).startswith("https://www.bing.com/search")
+    # The tab reports its new address once the navigation commits.
+    deadline = time.time() + 15
+    while not front_tab_url(page).startswith("https://www.bing.com/search"):
+        assert time.time() < deadline, front_tab_url(page)
+        time.sleep(0.5)
 
 
 def test_full_screen_covers_the_window_and_the_button_leaves_it(page):
@@ -682,7 +745,7 @@ def test_a_message_from_the_browser_view_works_in_the_tab_in_front(page):
     tab = page.request.get(page.url.split("/console")[0] + "/v1/status").json()["front_tab"]["id"]
     expect(page.get_by_test_id("browser-hint")).to_be_visible()
 
-    page.get_by_test_id("reply").fill("What is the main heading on this page? Answer in a few words.")
+    page.get_by_test_id("reply").fill("What is this page's title? Answer in a few words.")
     page.get_by_test_id("reply").press("Enter")
     page.wait_for_function("location.hash.startsWith('#s_')")
     session = page.evaluate("location.hash.slice(1)")
@@ -782,6 +845,146 @@ def test_the_address_bar_suggests_from_history_and_completes_in_place(page):
         == url.input_value()[len("exampl"):]
     url.press("Enter")
     expect(url).to_have_value(re.compile(r"^https://(www\.)?example\."), timeout=15000)
+
+
+# ---------------------------------------------------------------- when things go wrong
+
+
+# A failure a test puts in on purpose; the page fixture does not count it.
+FAULT = {"status": 502, "body": "", "headers": {"x-test-fault": "injected"}}
+
+
+def idle_seconds(page, session):
+    return next(s["idle_seconds"] for s in api_get(page, "/v1/status")["sessions"] if s["session"] == session)
+
+
+def test_browsing_focusing_or_archiving_a_session_keeps_it_from_expiring(page):
+    """Idle sessions expire and their tabs close; a blank session the user browses
+    in, focuses or archives is in use, though no run ever touched it."""
+    base = page.url.split("/console")[0]
+    headers = {"Origin": base}
+    session = open_blank_session(page)
+    for use in (
+            lambda: page.request.post(base + "/v1/browser/navigate", headers=headers,
+                                      data={"url": "example.com", "session": session}),
+            lambda: page.request.post(f"{base}/v1/sessions/{session}/focus", headers=headers),
+            lambda: page.request.post(f"{base}/v1/sessions/{session}/archive", headers=headers),
+            lambda: page.request.post(f"{base}/v1/sessions/{session}/unarchive", headers=headers)):
+        time.sleep(3)
+        assert idle_seconds(page, session) >= 3
+        assert use().ok
+        assert idle_seconds(page, session) <= 1
+
+
+def test_two_consoles_closing_one_session_at_once_get_one_close_and_one_not_found(page):
+    base = page.url.split("/console")[0]
+    session = open_blank_session(page)
+    cookie = "; ".join(f"{c['name']}={c['value']}" for c in page.context.cookies())
+    answers = []
+
+    def close():
+        request = urllib.request.Request(f"{base}/v1/sessions/{session}/close", method="POST", data=b"",
+                                         headers={"Cookie": cookie, "Origin": base})
+        try:
+            answers.append(urllib.request.urlopen(request, timeout=20).status)
+        except urllib.error.HTTPError as error:
+            answers.append(error.code)
+
+    threads = [threading.Thread(target=close) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(answers) == [200, 404]
+    expect(list_item(page, session)).to_have_count(0)
+
+
+def test_an_error_from_the_refresh_clears_when_the_next_refresh_works(page):
+    """One blip through the share used to leave its error over the session for good."""
+    page.route("**/v1/status", lambda route: route.fulfill(**FAULT))
+    expect(page.get_by_test_id("error")).to_have_text("Stealthbox did not answer GET /v1/status (HTTP 502).",
+                                                      timeout=10000)
+    page.unroute("**/v1/status")
+    expect(page.get_by_test_id("error")).to_be_hidden(timeout=10000)
+
+    # An action's error stays until the next action, whatever the refresh does.
+    page.route("**/v1/browser/navigate", lambda route: route.fulfill(**FAULT))
+    page.get_by_test_id("browser-item").click()
+    open_in_browser_view(page, "example.com")
+    error = page.get_by_test_id("error")
+    expect(error).to_have_text("Stealthbox did not answer POST /v1/browser/navigate (HTTP 502).", timeout=10000)
+    page.wait_for_timeout(5000)
+    expect(error).to_be_visible()
+    page.unroute("**/v1/browser/navigate")
+
+
+def needs_you(page, session, share_url):
+    """The console shows `session` as waiting on the user, with or without a share link."""
+    def answer(route):
+        response = route.fetch()
+        sessions = response.json()
+        for item in sessions["sessions"]:
+            if item["session"] == session:
+                item.update(state="needs", task="Sign in to carry on.",
+                            needs_user={"task": "Sign in to carry on.", "share_url": share_url})
+        route.fulfill(response=response, json=sessions)
+    page.route("**/v1/sessions", answer)
+
+
+def test_the_phone_link_shows_only_while_there_is_a_share(page):
+    session = open_blank_session(page)
+    needs_you(page, session, None)
+    expect(page.get_by_test_id("needs-card")).to_be_visible(timeout=10000)
+    expect(page.get_by_test_id("phone")).to_be_hidden()
+
+    page.unroute("**/v1/sessions")
+    needs_you(page, session, "https://example.trycloudflare.com/console#" + session)
+    expect(page.get_by_test_id("phone")).to_be_visible(timeout=10000)
+    expect(page.get_by_test_id("share-link")).to_have_text("https://example.trycloudflare.com/console#" + session)
+    page.unroute("**/v1/sessions")
+
+
+def test_the_address_bar_keys_walk_the_suggestions_and_escape_puts_back_what_was_typed(page):
+    open_in_browser_view(page, "example.org")
+    url = page.get_by_test_id("url")
+    expect(url).to_have_value(re.compile(r"^https://example\.org/?$"), timeout=15000)
+    suggestions = page.get_by_test_id("url-suggestions")
+    deadline = time.time() + 40
+    while True:
+        url.click()
+        url.press("ControlOrMeta+a")
+        url.press("Backspace")
+        url.type("exampl", delay=60)
+        page.wait_for_timeout(800)
+        if suggestions.is_visible():
+            break
+        assert time.time() < deadline, "no suggestions from history"
+        page.wait_for_timeout(4000)
+    # Delete takes off the completion, and a deletion does not complete again.
+    url.press("Delete")
+    page.wait_for_timeout(500)
+    assert url.input_value() == "exampl"
+    url.press("ArrowDown")
+    first = suggestions.locator("li").first
+    expect(first).to_have_attribute("aria-selected", "true")
+    assert url.input_value() == first.locator(".address").inner_text()
+    url.press("ArrowUp")
+    expect(url).to_have_value("exampl")
+    url.press("Escape")
+    expect(suggestions).to_be_hidden()
+    expect(url).to_have_value("exampl")
+    expect(url).to_be_focused()
+
+
+def test_the_console_reconnects_after_its_updates_stop(page):
+    page.route("**/v1/events/next*", lambda route: route.abort("aborted"))
+    # The long poll in flight ends within its 25 seconds; the next one fails.
+    expect(page.get_by_test_id("events-state")).to_have_text("Reconnecting…", timeout=40000)
+    page.unroute("**/v1/events/next*")
+    expect(page.get_by_test_id("events-state")).to_have_text("Live updates on", timeout=15000)
+    # And it still hears about what happens.
+    session = open_blank_session(page)
+    expect(list_item(page, session)).to_be_visible(timeout=10000)
 
 
 @pytest.mark.skipif(bool(CONSOLE_URL), reason="needs the share and this folder's Stealthbox")
