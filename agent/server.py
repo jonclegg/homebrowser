@@ -22,6 +22,8 @@
     GET  /v1/browser/screenshot      a JPEG of the live browser, for the console's preview;
                                      ?width= up to 1920 (default 320)
     GET  /v1/browser/history?q=      addresses from the browser's history, for the address bar
+    POST /v1/browser/close           {"tab": id}: close a tab (the console's Browser entry); a
+                                     session's tab closes its session
     POST /v1/browser/navigate        {"url": "...", "session": null}: load what was typed in the
                                      console's address bar in the session's tab, or the tab in front
     POST /v1/sessions/{session}/close  close its tab and forget it
@@ -578,6 +580,23 @@ class Stealthbox:
                 page.close()
         self.queue.put(chore)
         self.events.publish("session.closed", session=session.id)
+
+    def close_tab(self, target):
+        """Close a tab from the console's Browser entry, which stands for a tab no
+        listed session shows. A session's tab closes with its session. Chrome quits
+        with its last tab, so a blank one takes its place first."""
+        with self.lock:
+            owner = next((s for s in self.sessions.values() if s.target_id == target), None)
+        if owner is not None:
+            self.close(owner)
+            return
+        tabs = agent.page_targets()
+        if target not in {tab["id"] for tab in tabs}:
+            raise LookupError(f"no tab {target} (it may have closed already)")
+        if len(tabs) == 1:
+            agent.open_tab(background=False)
+        agent.close_target(target)
+        self.events.publish("browser.tab_closed", tab=target)
 
     def submit_smoke(self, sites):
         job = smoke.Smoke(sites, HOST_DATA_DIR)
@@ -1454,6 +1473,17 @@ def make_handler(stealthbox, token):
                 except RuntimeError as exc:
                     return self._send(409, {"error": str(exc)})
                 return self._send(200, {"run": run.id, "paused": run.paused})
+            if parts == ["v1", "browser", "close"]:
+                tab = text_field(self._json_body(), "tab")
+                if not tab:
+                    return self._send(400, {"error": "tab is required"})
+                try:
+                    stealthbox.close_tab(tab)
+                except LookupError as exc:
+                    return self._send(404, {"error": str(exc)})
+                except RuntimeError as exc:
+                    return self._send(409, {"error": str(exc)})
+                return self._send(200, {"tab": tab, "closed": True})
             if parts == ["v1", "browser", "navigate"]:
                 body = self._json_body()
                 text = (text_field(body, "url") or "").strip()

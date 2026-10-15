@@ -71,13 +71,14 @@ button, input, textarea { font: inherit; color: inherit; }
 .item .site { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .msg { color: var(--soft); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .msg.none { color: var(--muted); }
-/* A session's row: the entry, and its archive (or restore) button on the right, shown on
-   hover, on focus and on the chosen session; always on touch screens, which have no hover. */
+/* A row: the entry, and its X on the right (archive, restore, or close the tab). The X
+   shows while the mouse is over the row, or the keyboard is on it; always on touch
+   screens, which have no hover. Nothing else keeps it showing. */
 .row { position: relative; }
 .row .item { padding-right: 40px; }
 .row-action { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
 .row-action:hover { background: var(--line); color: var(--ink); }
-.row:hover .row-action, .row:focus-within .row-action, .row .item[aria-current="true"] + .row-action { opacity: 1; }
+.row:hover .row-action, .row:has(:focus-visible) .row-action { opacity: 1; }
 @media (hover: none) { .row-action { opacity: 1; } }
 /* Archived sessions: one line at the bottom of the list, closed until opened. */
 .archive { margin-top: auto; padding-bottom: 8px; border-top: 1px solid var(--line-soft); }
@@ -560,98 +561,129 @@ function livePreview() {
   return preview;
 }
 
-function browserItem() {
+// The list keeps its elements from one render to the next and changes only what
+// changed. Rebuilt on every refresh, the row under a still mouse lost its hover, and
+// the X with it, until the mouse moved.
+const rows = new Map();  // session id, or BROWSER, -> its row
+const headings = new Map();
+const emptyList = document.createElement('div');
+emptyList.className = 'empty-list';
+emptyList.textContent = 'No sessions yet.';
+const archiveSection = document.createElement('div');
+archiveSection.className = 'archive';
+archiveSection.dataset.testid = 'archive';
+archiveSection.innerHTML = `<button type="button" class="archive-toggle" id="archive-toggle" data-testid="archive-toggle">${CHEVRON}<span>Archived</span><span class="count"></span></button>`;
+
+function setText(el, text) { if (el.textContent !== text) el.textContent = text; }
+
+// Puts `nodes` in `parent` in order, moving only what is out of place.
+function arrange(parent, nodes) {
+  nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] || null); });
+  while (parent.children.length > nodes.length) parent.lastElementChild.remove();
+}
+
+function heading(name) {
+  if (!headings.has(name)) {
+    const el = document.createElement('div');
+    el.className = 'group';
+    el.textContent = name;
+    headings.set(name, el);
+  }
+  return headings.get(name);
+}
+
+// A row: the entry, and on its right the X, which shows while the mouse is over the
+// row (always on touch screens): archive a session, restore an archived one, or close
+// the Browser entry's tab.
+function row(key) {
+  if (!rows.has(key)) {
+    const el = document.createElement('div');
+    el.className = 'row';
+    el.innerHTML = '<button type="button" class="item"><span class="thumb"><img alt="" hidden></span>'
+      + '<span class="site"></span><span class="msg"></span><span class="status"><span class="dot"></span><span></span></span></button>'
+      + '<button type="button" class="row-action"></button>';
+    rows.set(key, el);
+  }
+  return rows.get(key);
+}
+
+function fillRow(el, { key, testid, state, shot, site, msg, quiet, action, icon, label, actionTestid, actionValue }) {
+  const [item, button] = el.children;
+  const [thumb, siteEl, msgEl, statusEl] = item.children;
+  item.dataset.session = key;
+  item.dataset.testid = testid;
+  item.dataset.state = state;
+  item.setAttribute('aria-current', String(key === selected));
+  if (key === BROWSER) {
+    // The live preview itself, which loads the next screenshot on its own.
+    if (thumb.firstElementChild !== preview) thumb.replaceChildren(preview);
+  } else {
+    const img = thumb.firstElementChild;
+    if (shot && img.getAttribute('src') !== shot) img.src = shot;
+    img.hidden = !shot;
+  }
+  setText(siteEl, site);
+  setText(msgEl, msg);
+  msgEl.classList.toggle('none', quiet);
+  setStatus(statusEl, state);
+  for (const name of ['archive', 'unarchive', 'closeTab']) if (name !== action) delete button.dataset[name];
+  button.dataset[action] = actionValue;
+  button.dataset.testid = actionTestid;
+  button.title = label;
+  button.setAttribute('aria-label', `${label} ${site}`);
+  if (button.dataset.icon !== icon) { button.innerHTML = icon === 'restore' ? RESTORE_ICON : X_ICON; button.dataset.icon = icon; }
+}
+
+function browserRow() {
   const tab = status.front_tab;
-  const item = document.createElement('button');
-  item.type = 'button';
-  item.className = 'item';
-  item.dataset.session = BROWSER;
-  item.dataset.testid = 'browser-item';
-  item.setAttribute('aria-current', String(selected === BROWSER));
-  const thumb = document.createElement('span'); thumb.className = 'thumb'; thumb.append(livePreview());
-  const site = document.createElement('span'); site.className = 'site';
-  site.textContent = tab ? siteOf(tab.url) || tab.url : 'Browser';
-  const msg = document.createElement('span'); msg.className = 'msg'; msg.textContent = tab ? tab.title || tab.url : 'No tab open';
-  const st = document.createElement('span'); st.innerHTML = '<span class="dot"></span><span></span>'; setStatus(st, 'live');
-  item.append(thumb, site, msg, st);
-  return item;
+  const el = row(BROWSER);
+  livePreview();
+  fillRow(el, {
+    key: BROWSER, testid: 'browser-item', state: 'live',
+    site: tab ? siteOf(tab.url) || tab.url : 'Browser',
+    msg: tab ? tab.title || tab.url : 'No tab open', quiet: !tab,
+    action: 'closeTab', icon: 'x', label: 'Close tab', actionTestid: 'close-tab', actionValue: tab ? tab.id : '',
+  });
+  // With no tab there is nothing to close.
+  el.lastElementChild.hidden = !tab;
+  return el;
 }
 
 function sessionRow(s) {
-  const row = document.createElement('div');
-  row.className = 'row';
-  const item = document.createElement('button');
-  item.type = 'button';
-  item.className = 'item';
-  item.dataset.session = s.session;
-  item.dataset.testid = 'session-item';
-  item.dataset.state = s.state;
-  item.setAttribute('aria-current', String(s.session === selected));
-  const thumb = document.createElement('span');
-  thumb.className = 'thumb';
+  const el = row(s.session);
   // A session whose tab is in front is what the live preview shows.
-  if (s.in_front) thumb.append(livePreview().cloneNode());
-  else if (s.shot_url) { const img = document.createElement('img'); img.src = s.shot_url; img.alt = ''; thumb.append(img); }
-  const site = document.createElement('span'); site.className = 'site'; site.textContent = title(s);
-  const msg = document.createElement('span'); msg.className = 'msg' + (lastAsk(s) ? '' : ' none'); msg.textContent = lastAsk(s) || 'No messages yet';
-  const st = document.createElement('span'); st.innerHTML = '<span class="dot"></span><span></span>'; setStatus(st, s.state);
-  item.append(thumb, site, msg, st);
-  const action = document.createElement('button');
-  action.type = 'button';
-  action.className = 'row-action';
-  const label = s.archived ? 'Unarchive' : 'Archive';
-  action.dataset[s.archived ? 'unarchive' : 'archive'] = s.session;
-  action.dataset.testid = s.archived ? 'unarchive-session' : 'archive-session';
-  action.title = label;
-  action.setAttribute('aria-label', `${label} ${title(s)}`);
-  action.innerHTML = s.archived ? RESTORE_ICON : X_ICON;
-  row.append(item, action);
-  return row;
+  const shot = s.in_front ? livePreview().getAttribute('src') : s.shot_url;
+  fillRow(el, {
+    key: s.session, testid: 'session-item', state: s.state, shot,
+    site: title(s), msg: lastAsk(s) || 'No messages yet', quiet: !lastAsk(s),
+    action: s.archived ? 'unarchive' : 'archive', icon: s.archived ? 'restore' : 'x',
+    label: s.archived ? 'Unarchive' : 'Archive', actionTestid: s.archived ? 'unarchive-session' : 'archive-session',
+    actionValue: s.session,
+  });
+  return el;
 }
 
 function renderList() {
-  const groups = $('groups');
-  groups.replaceChildren();
   const open = sessions.filter((s) => !s.archived);
   const archived = sessions.filter((s) => s.archived);
   // Once empty, the archive closes again for the next session that goes there.
   if (!archived.length) archiveOpen = false;
-  if (!frontOwner()) {
-    const heading = document.createElement('div');
-    heading.className = 'group';
-    heading.textContent = 'Browser';
-    groups.append(heading, browserItem());
-  }
-  if (!open.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-list';
-    empty.textContent = 'No sessions yet.';
-    groups.append(empty);
-  }
+  for (const key of rows.keys()) if (key !== BROWSER && !sessions.some((s) => s.session === key)) rows.delete(key);
+  const nodes = [];
+  if (!frontOwner()) nodes.push(heading('Browser'), browserRow());
+  if (!open.length) nodes.push(emptyList);
   for (const [name, states] of GROUPS) {
     const members = open.filter((s) => states.includes(s.state));
-    if (!members.length) continue;
-    const heading = document.createElement('div');
-    heading.className = 'group';
-    heading.textContent = name;
-    groups.append(heading, ...members.map(sessionRow));
+    if (members.length) nodes.push(heading(name), ...members.map(sessionRow));
   }
   if (archived.length) {
-    const section = document.createElement('div');
-    section.className = 'archive';
-    section.dataset.testid = 'archive';
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'archive-toggle';
-    toggle.id = 'archive-toggle';
-    toggle.dataset.testid = 'archive-toggle';
+    const toggle = archiveSection.firstElementChild;
     toggle.setAttribute('aria-expanded', String(archiveOpen));
-    toggle.innerHTML = `${CHEVRON}<span>Archived</span><span class="count"></span>`;
-    toggle.lastElementChild.textContent = archived.length;
-    section.append(toggle);
-    if (archiveOpen) section.append(...archived.map(sessionRow));
-    groups.append(section);
+    setText(toggle.lastElementChild, String(archived.length));
+    arrange(archiveSection, [toggle, ...(archiveOpen ? archived.map(sessionRow) : [])]);
+    nodes.push(archiveSection);
   }
+  arrange($('groups'), nodes);
   $('drawer-needs').hidden = !open.some((s) => s.state === 'needs' && s.session !== selected);
 }
 
@@ -1243,6 +1275,14 @@ async function act(name, s) {
 }
 
 // Archiving the session on screen moves on, as a mail app does, to what needs you or is at work.
+async function closeTab(tab) {
+  $('s-error').hidden = true;
+  try {
+    await api('POST', '/v1/browser/close', { tab });
+    await refresh();
+  } catch (error) { showError(error); }
+}
+
 async function setArchived(session, archived) {
   $('s-error').hidden = true;
   try {
@@ -1254,10 +1294,13 @@ async function setArchived(session, archived) {
 
 $('groups').addEventListener('click', (event) => {
   if (event.target.closest('#archive-toggle')) { archiveOpen = !archiveOpen; renderList(); return; }
-  const action = event.target.closest('[data-archive], [data-unarchive]');
+  const action = event.target.closest('[data-archive], [data-unarchive], [data-close-tab]');
   if (action) {
+    // The row stays the same element afterwards (archived, it moves down), so its X comes back.
     action.disabled = true;
-    setArchived(action.dataset.archive || action.dataset.unarchive, Boolean(action.dataset.archive));
+    const done = action.dataset.closeTab ? closeTab(action.dataset.closeTab)
+      : setArchived(action.dataset.archive || action.dataset.unarchive, Boolean(action.dataset.archive));
+    done.finally(() => { action.disabled = false; });
     return;
   }
   const item = event.target.closest('[data-session]');
