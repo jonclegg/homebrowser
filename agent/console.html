@@ -741,7 +741,9 @@ function renderNow(s, busyElsewhere) {
   if (s.state === 'new' && !s.in_front && busyElsewhere) {
     // One screen and one mouse: the tab is open, behind the run that has them.
     kind = 'waiting'; label = 'Opening';
-    text = `Stealthbox is working on ${title(busyElsewhere)}, so this tab waits behind it and comes to the front when that run is done. To use it now, take over or stop that run.`;
+    text = busyElsewhere.state === 'paused'
+      ? `You have the mouse in ${title(busyElsewhere)}, so this tab waits behind it and comes to the front when you hand back or stop that run.`
+      : `Stealthbox is working on ${title(busyElsewhere)}, so this tab waits behind it and comes to the front when that run is done. To use it now, take over or stop that run.`;
   } else if (s.state === 'new') {
     text = 'A blank tab. Browse in it yourself, or message Stealthbox to work in it.';
   } else if (s.state === 'needs') {
@@ -1225,7 +1227,9 @@ async function listen() {
 async function act(name, s) {
   $('s-error').hidden = true;
   if (name === 'go-to-busy') {
-    selected = sessions.find((other) => other.session !== s.session && ['working', 'paused'].includes(other.state)).session;
+    // That run may have ended since the button was drawn; then this one simply redraws.
+    const busy = sessions.find((other) => other.session !== s.session && ['working', 'paused'].includes(other.state));
+    if (busy) selected = busy.session;
     render();
     return;
   }
