@@ -623,27 +623,36 @@ def test_the_x_shows_only_while_the_mouse_is_over_its_row(page):
 
 def test_the_x_stays_under_a_still_mouse_while_the_list_refreshes(page):
     """The list was rebuilt on every refresh; under a mouse that did not move, the new
-    row was not hovered, so the X went away until the mouse moved."""
-    session = open_blank_session(page)
-    list_item(page, session).hover()
-    expect(x_of(list_item(page, session))).to_have_css("opacity", "1")
-    page.evaluate("id => { window.hoveredRow = document.querySelector(`[data-session='${id}']`).parentElement; }",
-                  session)
-    # Refreshes, and a change to the list: another session comes in above it.
+    row was not hovered, so the X went away until the mouse moved. A row must not even
+    be moved out and back in while others change around it."""
     base = page.url.split("/console")[0]
+    hovered = open_blank_session(page)
+    # Newer, so listed above the hovered row; archived, it moves past it.
+    moving = open_blank_session(page)
+    list_item(page, hovered).hover()
+    expect(x_of(list_item(page, hovered))).to_have_css("opacity", "1")
+    page.evaluate("""id => {
+        window.hoveredRow = document.querySelector(`[data-session='${id}']`).parentElement;
+        window.hoveredRowRemoved = false;
+        new MutationObserver((records) => records.forEach((record) => record.removedNodes.forEach((node) => {
+            if (node === window.hoveredRow) window.hoveredRowRemoved = true;
+        }))).observe(document.getElementById('groups'), { childList: true, subtree: true });
+    }""", hovered)
+    # Refreshes, a new session above it, and one moving past it into the archive.
     page.request.post(base + "/v1/sessions", headers={"Origin": base})
+    page.request.post(f"{base}/v1/sessions/{moving}/archive", headers={"Origin": base})
     page.wait_for_timeout(7000)
-    assert page.evaluate("id => window.hoveredRow.isConnected && "
-                         "document.querySelector(`[data-session='${id}']`).parentElement === window.hoveredRow", session), \
-        "the row under the mouse was replaced"
-    list_item(page, session).hover()
-    assert x_showing(list_item(page, session))
+    assert page.evaluate("id => !window.hoveredRowRemoved && "
+                         "document.querySelector(`[data-session='${id}']`).parentElement === window.hoveredRow", hovered), \
+        "the row under the mouse was replaced or moved"
+    assert x_showing(list_item(page, hovered)), "the X went away under a still mouse"
 
 
 def test_the_browser_entry_has_an_x_that_closes_its_tab(browser, page):
     """The Browser entry stands for a tab no session shows (another program's, or one
     opened by hand); it looked like a session with no X."""
     driver = stealthbox_browser()
+    tab = None
     try:
         tab = driver.contexts[0].new_page()
         tab.goto("https://example.com/", wait_until="domcontentloaded")
@@ -659,10 +668,29 @@ def test_the_browser_entry_has_an_x_that_closes_its_tab(browser, page):
             x_of(entry).click()
         expect(page.get_by_test_id("browser-item")).not_to_contain_text("example.com", timeout=15000)
     finally:
+        # Left open, the tab would be the Browser entry of the tests after this one.
+        if tab is not None and not tab.is_closed():
+            tab.close()
         driver.close()
     base = page.url.split("/console")[0]
     response = page.request.post(base + "/v1/browser/close", data={"tab": "not-a-tab"}, headers={"Origin": base})
     assert response.status == 404, response.text()
+
+
+def test_the_browser_entry_x_on_an_archived_sessions_tab_closes_the_tab_and_the_session(page):
+    """Archived, a session leaves the list, so the Browser entry stands for its tab."""
+    session = open_blank_session(page)
+    tab = api_get(page, f"/v1/sessions/{session}")["tab"]
+    archive_from_the_list(page, session)
+    entry = page.get_by_test_id("browser-item")
+    expect(entry).to_be_visible(timeout=10000)
+    assert api_get(page, "/v1/status")["front_tab"]["id"] == tab
+    entry.hover()
+    x_of(entry).click()
+    expect(page.get_by_test_id("archive")).to_have_count(0, timeout=15000)
+    base = page.url.split("/console")[0]
+    assert page.request.get(f"{base}/v1/sessions/{session}").status == 404
+    assert api_get(page, "/v1/status")["front_tab"]["id"] != tab
 
 
 def test_the_archive_button_shows_without_hover_on_a_phone(browser, link):

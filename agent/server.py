@@ -582,20 +582,27 @@ class Stealthbox:
         self.events.publish("session.closed", session=session.id)
 
     def close_tab(self, target):
-        """Close a tab from the console's Browser entry, which stands for a tab no
-        listed session shows. A session's tab closes with its session. Chrome quits
-        with its last tab, so a blank one takes its place first."""
+        """Close a tab from the console's Browser entry, which stands for a tab no listed
+        session shows: another program's, one opened by hand, or an archived session's
+        (closed with it). Chrome quits with its last tab, so a blank one takes its place
+        first. Under the lock, so two consoles cannot both close the last two tabs."""
         with self.lock:
             owner = next((s for s in self.sessions.values() if s.target_id == target), None)
+            if owner is not None and not owner.archived:
+                # The console's tab id is a refresh old; the user may have switched tabs since.
+                raise RuntimeError(f"that tab is session {owner.id}'s now; close it from its row")
+            if owner is not None and owner.busy:
+                raise RuntimeError(f"session {owner.id} is still working in that tab; stop its run first")
+            tabs = agent.page_targets()
+            if target not in {tab["id"] for tab in tabs}:
+                raise LookupError(f"no tab {target} (it may have closed already)")
+            if len(tabs) == 1:
+                agent.open_tab(background=False)
+            agent.close_target(target)
+            if owner is not None:
+                del self.sessions[owner.id]
         if owner is not None:
-            self.close(owner)
-            return
-        tabs = agent.page_targets()
-        if target not in {tab["id"] for tab in tabs}:
-            raise LookupError(f"no tab {target} (it may have closed already)")
-        if len(tabs) == 1:
-            agent.open_tab(background=False)
-        agent.close_target(target)
+            self.events.publish("session.closed", session=owner.id)
         self.events.publish("browser.tab_closed", tab=target)
 
     def submit_smoke(self, sites):

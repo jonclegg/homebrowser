@@ -576,10 +576,28 @@ archiveSection.innerHTML = `<button type="button" class="archive-toggle" id="arc
 
 function setText(el, text) { if (el.textContent !== text) el.textContent = text; }
 
-// Puts `nodes` in `parent` in order, moving only what is out of place.
+// Puts `nodes` in `parent` in order. The longest run already in order stays where it
+// is and only the rest move: a row moved out and back in loses its hover in Safari.
 function arrange(parent, nodes) {
-  nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] || null); });
-  while (parent.children.length > nodes.length) parent.lastElementChild.remove();
+  const wanted = new Set(nodes);
+  for (const child of [...parent.children]) if (!wanted.has(child)) child.remove();
+  const position = new Map([...parent.children].map((child, i) => [child, i]));
+  // Longest increasing run of current positions, in the wanted order (patience sorting).
+  const tails = [], previous = new Map();
+  for (const node of nodes) {
+    if (!position.has(node)) continue;
+    let low = 0, high = tails.length;
+    while (low < high) { const middle = (low + high) >> 1; if (position.get(tails[middle]) < position.get(node)) low = middle + 1; else high = middle; }
+    previous.set(node, low ? tails[low - 1] : null);
+    tails[low] = node;
+  }
+  const stay = new Set();
+  for (let node = tails.at(-1); node; node = previous.get(node)) stay.add(node);
+  let next = null;
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    if (!stay.has(nodes[i])) parent.insertBefore(nodes[i], next);
+    next = nodes[i];
+  }
 }
 
 function heading(name) {
