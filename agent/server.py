@@ -448,6 +448,11 @@ class Stealthbox:
         run.turn.paused = paused
         self.events.publish("run.paused" if paused else "run.resumed", run=run.id, session=run.session.id)
 
+    def _sessions(self):
+        """A copy of the sessions: HTTP threads add and remove them while others read."""
+        with self.lock:
+            return list(self.sessions.values())
+
     def session(self, session_id):
         with self.lock:
             session = self.sessions.get(session_id)
@@ -479,7 +484,8 @@ class Stealthbox:
             if tab is None:
                 raise LookupError("no tab is open")
             target = tab["id"]
-            session = next((s for s in self.sessions.values() if s.target_id == target), None)
+            with self.lock:
+                session = next((s for s in self.sessions.values() if s.target_id == target), None)
         else:
             target = session.target_id
             if target is None:
@@ -490,6 +496,7 @@ class Stealthbox:
         agent.navigate_tab(target, url)
         if session is not None:
             session.url = url
+            session.last_used = time.time()
         self.events.publish("browser.navigated", tab=target, url=url)
         return url
 
@@ -497,15 +504,28 @@ class Stealthbox:
         """Bring the session's tab to the front, after the run in progress if there is one.
         A paused run holds the browser thread until the user hands back, so its tab
         comes to the front at once."""
+        session.last_used = time.time()
         if session.state() == "paused":
             agent.activate_tab(session.target_id)
             self.events.publish("session.focused", session=session.id)
             return
         def chore(context):
-            if session.page is not None and not session.page.is_closed():
-                session.page.bring_to_front()
-                self.events.publish("session.focused", session=session.id)
+            page = self._session_page(context, session)
+            if page is None:
+                self.events.publish("session.tab_lost", session=session.id)
+                return
+            page.bring_to_front()
+            self.events.publish("session.focused", session=session.id)
         self.queue.put(chore)
+
+    @staticmethod
+    def _session_page(context, session):
+        """On the browser thread: the session's open page. After the browser reconnects
+        the old page object is dead, so find its tab again by target id."""
+        if session.page is None or session.page.is_closed():
+            session.page = next((page for page in context.pages
+                                 if session.target_id and agent.humanize.target_id(page) == session.target_id), None)
+        return session.page
 
     def open_blank(self):
         """A session with no task yet: a new tab, brought to the front once the run in
@@ -528,6 +548,7 @@ class Stealthbox:
 
     def archive(self, session, archived):
         with self.lock:
+            session.last_used = time.time()
             self._archive(session, archived)
 
     def _archive(self, session, archived):
@@ -538,12 +559,18 @@ class Stealthbox:
         self.events.publish("session.archived" if archived else "session.unarchived", session=session.id)
 
     def close(self, session):
-        if session.busy:
-            raise RuntimeError(f"session {session.id} is still working; stop its run first")
         with self.lock:
-            del self.sessions[session.id]
-        page = None if session.borrowed else session.page
-        self.queue.put(lambda context: page is not None and not page.is_closed() and page.close())
+            if session.busy:
+                raise RuntimeError(f"session {session.id} is still working; stop its run first")
+            # Two consoles can close it at once; the second finds it gone.
+            if self.sessions.pop(session.id, None) is None:
+                raise LookupError(f"no session {session.id} (it was closed)")
+
+        def chore(context):
+            page = None if session.borrowed else self._session_page(context, session)
+            if page is not None:
+                page.close()
+        self.queue.put(chore)
         self.events.publish("session.closed", session=session.id)
 
     def submit_smoke(self, sites):
@@ -571,7 +598,7 @@ class Stealthbox:
             "sessions": [
                 {"session": session.id, "turns": len(session.conversation) // 2,
                  "idle_seconds": int(time.time() - session.last_used), "busy": session.busy}
-                for session in self.sessions.values()
+                for session in self._sessions()
             ],
         }
 
@@ -708,7 +735,7 @@ class Stealthbox:
             self.browser = playwright.chromium.connect_over_cdp(CDP_URL)
             self.events.publish("browser.connected", reconnect=reconnect)
             # Pages from an old connection are dead.
-            for session in self.sessions.values():
+            for session in self._sessions():
                 if session.page is not None:
                     self.events.publish("session.tab_lost", session=session.id)
                 session.page = None
@@ -732,8 +759,12 @@ class Stealthbox:
 
     def _expire_sessions(self):
         cutoff = time.time() - SESSION_IDLE_SECONDS
+        # The tab in front is the one the user is looking at, perhaps browsing in it
+        # by hand, which no request to the API shows.
+        front = (self.front_tab() or {}).get("id")
         with self.lock:
-            stale = [s for s in self.sessions.values() if not s.busy and s.last_used < cutoff]
+            stale = [s for s in self.sessions.values()
+                     if not s.busy and s.last_used < cutoff and not (front and s.target_id == front)]
             for session in stale:
                 del self.sessions[session.id]
         for session in stale:
@@ -834,6 +865,18 @@ def load_token():
             fh.write(secrets.token_urlsafe(32) + "\n")
     with open(path) as fh:
         return fh.read().strip()
+
+
+class BadRequest(Exception):
+    """A request the API cannot take; answered 400 with this message."""
+
+
+def text_field(body, name):
+    """A JSON body's text field, or None when it is left out."""
+    value = body.get(name)
+    if value is not None and not isinstance(value, str):
+        raise BadRequest(f"{name} must be text")
+    return value
 
 
 def make_handler(stealthbox, token):
@@ -1084,7 +1127,35 @@ def make_handler(stealthbox, token):
         def _parts(self):
             return [unquote(part) for part in self.path.split("?")[0].strip("/").split("/")]
 
+        def send_response(self, code, message=None):
+            self._responded = True
+            super().send_response(code, message)
+
+        def _answer(self, route):
+            """Every request gets an answer. A handler that raised used to drop the
+            connection, which reaches the console through the share as Cloudflare's
+            bare 502, saying nothing about what went wrong."""
+            self._responded = False
+            try:
+                route()
+            except (BrokenPipeError, ConnectionResetError):
+                # The caller hung up before the answer was written.
+                return
+            except BadRequest as exc:
+                self._send(400, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - the HTTP boundary
+                if self._responded:
+                    raise
+                traceback.print_exc()
+                self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+
         def do_GET(self):  # noqa: N802
+            self._answer(self._get)
+
+        def do_POST(self):  # noqa: N802
+            self._answer(self._post)
+
+        def _get(self):
             parts = self._parts()
             if parts == ["v1", "health"]:
                 return self._send(200, {"ok": True})
@@ -1118,7 +1189,10 @@ def make_handler(stealthbox, token):
                 text = parse_qs(urlparse(self.path).query).get("q", [""])[0]
                 return self._send(200, {"suggestions": agent.history_suggestions(text) if text.strip() else []})
             if parts == ["v1", "browser", "screenshot"]:
-                width = int(parse_qs(urlparse(self.path).query).get("width", [PREVIEW_WIDTH])[0])
+                width = parse_qs(urlparse(self.path).query).get("width", [str(PREVIEW_WIDTH)])[0]
+                if not width.isdigit():
+                    raise BadRequest("width must be a whole number of pixels")
+                width = int(width)
                 return self._send_image(agent.display_thumbnail(min(width, MAX_PREVIEW_WIDTH)))
             if parts == ["v1", "status"]:
                 return self._send(200, stealthbox.status())
@@ -1216,9 +1290,13 @@ def make_handler(stealthbox, token):
                 return self._send(200, {"events": [], "gap": False, "last_id": stealthbox.events.last_id()})
             if not since.isdigit():
                 return self._send(400, {"error": "since must be a non-negative event id"})
-            events, gap = stealthbox.events.after(int(since), EVENTS_POLL_SECONDS)
+            since = int(since)
+            if since > stealthbox.events.last_id():
+                # An id this stream never issued (Stealthbox restarted): replay what is held.
+                since = 0
+            events, gap = stealthbox.events.after(since, EVENTS_POLL_SECONDS)
             return self._send(200, {"events": events, "gap": gap,
-                                    "last_id": events[-1]["id"] if events else int(since)})
+                                    "last_id": events[-1]["id"] if events else since})
 
         @staticmethod
         def _event_chunk(event):
@@ -1262,9 +1340,15 @@ def make_handler(stealthbox, token):
             length = int(self.headers.get("Content-Length") or 0)
             if not length:
                 return {}
-            return json.loads(self.rfile.read(length))
+            try:
+                body = json.loads(self.rfile.read(length))
+            except json.JSONDecodeError as exc:
+                raise BadRequest(f"body is not JSON: {exc}") from exc
+            if not isinstance(body, dict):
+                raise BadRequest("body must be a JSON object")
+            return body
 
-        def do_POST(self):  # noqa: N802
+        def _post(self):
             parts = self._parts()
             if parts == ["setup"]:
                 return self._setup("POST")
@@ -1318,16 +1402,17 @@ def make_handler(stealthbox, token):
                 job.done.wait()
                 return self._send(200, job.view())
             if parts == ["v1", "chat"]:
-                try:
-                    body = self._json_body()
-                except json.JSONDecodeError as exc:
-                    return self._send(400, {"error": f"body is not JSON: {exc}"})
-                message = (body.get("message") or "").strip()
+                body = self._json_body()
+                message = (text_field(body, "message") or "").strip()
                 if not message:
                     return self._send(400, {"error": "message is required"})
-                max_stuck_steps = min(int(body.get("max_stuck_steps") or DEFAULT_MAX_STUCK_STEPS), MAX_STUCK_STEPS_LIMIT)
+                max_stuck_steps = body.get("max_stuck_steps") or DEFAULT_MAX_STUCK_STEPS
+                if not isinstance(max_stuck_steps, int) or isinstance(max_stuck_steps, bool) or max_stuck_steps < 1:
+                    raise BadRequest("max_stuck_steps must be a whole number above 0")
+                max_stuck_steps = min(max_stuck_steps, MAX_STUCK_STEPS_LIMIT)
                 try:
-                    run = stealthbox.submit(message, body.get("session"), max_stuck_steps, body.get("tab"))
+                    run = stealthbox.submit(message, text_field(body, "session"), max_stuck_steps,
+                                            text_field(body, "tab"))
                 except ValueError as exc:
                     return self._send(400, {"error": str(exc)})
                 except PermissionError as exc:
@@ -1354,11 +1439,11 @@ def make_handler(stealthbox, token):
                 return self._send(200, {"run": run.id, "paused": run.paused})
             if parts == ["v1", "browser", "navigate"]:
                 body = self._json_body()
-                text = (body.get("url") or "").strip()
+                text = (text_field(body, "url") or "").strip()
                 if not text:
                     return self._send(400, {"error": "url is required"})
                 try:
-                    session = stealthbox.session(body["session"]) if body.get("session") else None
+                    session = stealthbox.session(text_field(body, "session")) if body.get("session") else None
                     url = stealthbox.navigate(text, session)
                 except LookupError as exc:
                     return self._send(404, {"error": str(exc)})

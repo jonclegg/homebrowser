@@ -40,6 +40,7 @@ from aiohttp import web
 
 from stealthbox_launcher.browser import build_args, maybe_resolve_geoip, _resolve_webrtc_args, _normalize_socks_string_url
 from stealthbox_launcher.config import binary_supports_maximized_window
+from stealthbox_launcher import history
 
 logging.basicConfig(
     level=logging.INFO,
@@ -993,6 +994,18 @@ async def handle_root(request: web.Request) -> web.Response:
     })
 
 
+async def handle_history(request: web.Request) -> web.Response:
+    """Addresses from the default identity's history for an address bar: GET /history?q=.
+
+    Chrome keeps its profile to the user it runs as (mode 700); a caller running
+    as another user asks here.
+    """
+    pool: ChromePool = request.app["pool"]
+    profile = os.path.join(pool._data_dir, pool.default_key)
+    found = await asyncio.to_thread(history.suggestions, profile, request.query.get("q", ""))
+    return web.json_response({"suggestions": found})
+
+
 async def handle_json_version(request: web.Request) -> web.Response:
     """Proxy /json/version with optional per-seed routing."""
     pool: ChromePool = request.app["pool"]
@@ -1331,6 +1344,7 @@ def main() -> None:
     app.router.add_get("/json/list/", handle_json_list)
     app.router.add_get("/json", handle_json_list)
     app.router.add_get("/json/", handle_json_list)
+    app.router.add_get("/history", handle_history)
 
     # WebSocket routes — seed-specific (must be before default to match first)
     app.router.add_post("/fingerprint/{seed}/close", handle_close)

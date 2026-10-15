@@ -40,11 +40,8 @@ import json
 import os
 import random
 import re
-import shutil
-import sqlite3
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -319,6 +316,16 @@ def front_tab():
     return {"id": tab["id"], "url": tab["url"], "title": tab["title"]}
 
 
+def history_suggestions(text):
+    """Addresses from the browser's own history matching `text`, best first.
+
+    cdp-server reads them: Chrome's profile is root's alone, and on a Linux host
+    this process runs as the data folder's owner.
+    """
+    with urllib.request.urlopen(f"{humanize.CDP_URL}/history?q={quote_plus(text)}", timeout=10) as response:
+        return json.load(response)["suggestions"]
+
+
 def display_thumbnail(width):
     """A JPEG of the whole X display, what the live view shows, `width` pixels wide."""
     with mss.mss() as screen:
@@ -328,41 +335,6 @@ def display_thumbnail(width):
     out = io.BytesIO()
     image.save(out, "JPEG", quality=70)
     return out.getvalue()
-
-
-# The default identity's browser history (stealthbox-serve.sh keeps its profile here).
-HISTORY_DB = "/profile/default/Default/History"
-
-
-def history_suggestions(text, limit=8):
-    """Addresses from the browser's own history matching `text`, as Chrome's address
-    bar ranks them: a host that starts with it first, then typed, then visited most."""
-    text = text.strip().lower()
-    with tempfile.TemporaryDirectory() as folder:
-        # Chrome holds the file open; a copy (with its journal) reads cleanly.
-        for suffix in ("", "-journal", "-wal"):
-            if os.path.exists(HISTORY_DB + suffix):
-                shutil.copy(HISTORY_DB + suffix, os.path.join(folder, "History" + suffix))
-        database = sqlite3.connect(os.path.join(folder, "History"))
-        try:
-            rows = database.execute(
-                "SELECT url, title, typed_count, visit_count FROM urls WHERE hidden = 0 "
-                "AND (url LIKE ? OR title LIKE ?) ORDER BY last_visit_time DESC LIMIT 400",
-                (f"%{text}%", f"%{text}%")).fetchall()
-        finally:
-            database.close()
-
-    def address(url):
-        return re.sub(r"^https?://(www\.)?", "", url)
-
-    rows = [row for row in rows if row[0].startswith(("http://", "https://"))]
-    rows.sort(key=lambda row: (not address(row[0]).lower().startswith(text), -row[2], -row[3]))
-    suggestions, seen = [], set()
-    for url, title, _typed, _visits in rows:
-        if address(url) not in seen:
-            seen.add(address(url))
-            suggestions.append({"url": url, "address": address(url), "title": title})
-    return suggestions[:limit]
 
 
 def typed_url(text):

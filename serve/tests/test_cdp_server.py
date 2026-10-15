@@ -875,3 +875,35 @@ class TestPoolLifecycleMethods:
                                       "_settle_window", "_make_room", "_abandon_launch"])
     def test_method_exists(self, name):
         assert callable(getattr(ChromePool, name))
+
+
+# ---------------------------------------------------------------------------
+# GET /history
+# ---------------------------------------------------------------------------
+
+
+class TestHistory:
+    """The address bar's suggestions come from the default identity's profile, under
+    the pool's key for it: the fingerprint seed when one is set."""
+
+    @pytest.mark.parametrize("default_seed", [None, "39758"])
+    def test_reads_the_default_identitys_history(self, tmp_path, default_seed):
+        import sqlite3
+
+        key = default_seed or "__default__"
+        (tmp_path / key / "Default").mkdir(parents=True)
+        database = sqlite3.connect(tmp_path / key / "Default" / "History")
+        database.execute("CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT, title TEXT, visit_count INTEGER, "
+                         "typed_count INTEGER, last_visit_time INTEGER, hidden INTEGER)")
+        database.execute("INSERT INTO urls VALUES (1, 'https://github.com/notifications', 'Notifications', 1, 1, 1, 0)")
+        database.commit()
+        database.close()
+        pool = ChromePool(binary="chrome", global_args=[], headless=True, data_dir=str(tmp_path),
+                          default_seed=default_seed)
+        request = SimpleNamespace(app={"pool": pool}, query={"q": "git"})
+
+        response = asyncio.run(_mod.handle_history(request))
+
+        assert json.loads(response.text) == {"suggestions": [
+            {"url": "https://github.com/notifications", "address": "github.com/notifications",
+             "title": "Notifications"}]}

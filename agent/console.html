@@ -413,7 +413,7 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
             <button class="btn amber" type="button" data-act="carry-on" data-testid="carry-on">Done, carry on</button>
             <button class="btn quiet" type="button" data-act="close" data-testid="close-needs">Close session</button>
           </div>
-          <div class="phone" id="s-phone" hidden>
+          <div class="phone" id="s-phone" hidden data-testid="phone">
             <span>On your phone instead?</span>
             <span class="link" id="s-link" data-testid="share-link"></span>
             <button class="btn small" type="button" data-act="copy" data-testid="copy-link">Copy link</button>
@@ -490,13 +490,22 @@ async function api(method, path, body) {
   });
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) { location.reload(); throw new Error('Signed out of the console.'); }
-  if (!response.ok) throw new Error(data.error || `${response.status} ${response.statusText}`);
+  // No message means the answer came from the share tunnel, not Stealthbox (and a
+  // 502 through HTTP/2 has no status text at all).
+  if (!response.ok) throw new Error(data.error || `Stealthbox did not answer ${method} ${path.split('?')[0]} (HTTP ${response.status}).`);
   return data;
 }
 
-function showError(error) {
+// `source` names a request the console repeats on its own (the refresh, the address
+// bar's suggestions): its error clears when that request next succeeds. An action's
+// error stays until the next action.
+function showError(error, source = 'action') {
   $('s-error').textContent = error.message;
+  $('s-error').dataset.source = source;
   $('s-error').hidden = false;
+}
+function clearError(source) {
+  if ($('s-error').dataset.source === source) $('s-error').hidden = true;
 }
 
 function current() { return sessions.find((s) => s.session === selected) || null; }
@@ -877,7 +886,8 @@ function renderSession() {
   $('s-compose-needs').hidden = !needs;
   if (needs) {
     $('s-task-text').textContent = s.task || '';
-    $('s-phone').hidden = !s.needs_user;
+    // The link exists only while the share is on.
+    $('s-phone').hidden = !s.needs_user?.share_url;
     $('s-link').textContent = s.needs_user?.share_url || '';
   }
   $('s-paused').hidden = s.state !== 'paused';
@@ -985,7 +995,8 @@ async function suggest(complete) {
   if (!text.trim()) { hideSuggestions(); return; }
   let found;
   try { ({ suggestions: found } = await api('GET', `/v1/browser/history?q=${encodeURIComponent(text)}`)); }
-  catch (error) { showError(error); return; }
+  catch (error) { showError(error, 'suggest'); return; }
+  clearError('suggest');
   if (document.activeElement !== input || typedText !== text) return;
   showSuggestions(found);
   const top = found[0];
@@ -1168,7 +1179,8 @@ function render() {
 async function refresh() {
   try {
     [status, { sessions }] = await Promise.all([api('GET', '/v1/status'), api('GET', '/v1/sessions')]);
-  } catch (error) { showError(error); return; }
+  } catch (error) { showError(error, 'refresh'); return; }
+  clearError('refresh');
   $('browser-dot').style.background = status.browser_connected ? 'var(--ok)' : 'var(--wait)';
   $('browser-text').textContent = status.browser_connected ? 'Browser ready' : 'Browser not connected yet';
   render();
@@ -1186,14 +1198,20 @@ function setLive(on) {
 // Events response until it ends, so the share link would never see an event.
 async function listen() {
   let since = null;
+  let missed = false;
   for (;;) {
     try {
       const data = await api('GET', since === null ? '/v1/events/next' : `/v1/events/next?since=${since}`);
       setLive(true);
-      if (since !== null && (data.events.length || data.gap)) soon();
+      if (missed || data.events.length || data.gap) soon();
+      missed = false;
       since = data.last_id;
     } catch (error) {
       setLive(false);
+      // Start over with an answer that does not wait for an event, so "Live updates on"
+      // comes back as soon as Stealthbox does, and refresh what was missed meanwhile.
+      since = null;
+      missed = true;
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
