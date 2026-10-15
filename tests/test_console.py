@@ -16,6 +16,9 @@ share link (then run only the tests that do not need the share, with -k). The te
 they signed in. They start a share (`stealthbox share --json`), and the last one
 stops and restarts it, which signs out the devices that used the old link.
 
+STEALTHBOX_TEST_BROWSER=webkit drives the console with Safari's engine instead of
+Chromium (with STEALTHBOX_CONSOLE_URL).
+
 Run them on a Linux host too (with STEALTHBOX_CONSOLE_URL over an SSH tunnel, say).
 There the API runs as the data folder's owner while Chrome runs as root, and the
 address bar's history once failed only there; on a Mac host both run as root.
@@ -48,6 +51,9 @@ PASSWORD = os.environ.get("STEALTHBOX_CONSOLE_PASSWORD", "")
 # link, with its CDP URL: for the tests that do not need the share itself.
 CONSOLE_URL = os.environ.get("STEALTHBOX_CONSOLE_URL", "")
 CDP_URL = os.environ.get("STEALTHBOX_CDP_URL", "")
+# The browser the tests drive the console with: chromium, or webkit for Safari's engine
+# (hover and focus differ between them).
+ENGINE = os.environ.get("STEALTHBOX_TEST_BROWSER", "chromium")
 
 
 def stealthbox(*args):
@@ -98,11 +104,27 @@ def console_password():
         pytest.fail("Set STEALTHBOX_CONSOLE_PASSWORD to this install's console password.")
 
 
+# How each engine names a request the page itself gave up on (a reload ends the long poll).
+ABORTED = {"net::ERR_ABORTED", "cancelled"}
+# Playwright's Chromium, for connecting to Stealthbox's own browser over CDP whatever
+# engine drives the console.
+CHROMIUM = []
+
+
+def stealthbox_browser():
+    return CHROMIUM[0].connect_over_cdp(CDP_URL or json.loads(stealthbox("status", "--json"))["cdp_url"])
+
+
 @pytest.fixture(scope="module")
 def browser():
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            args=[f"--host-resolver-rules=MAP *.trycloudflare.com {cloudflare_address()}"])
+        CHROMIUM[:] = [playwright.chromium]
+        if ENGINE == "chromium":
+            browser = playwright.chromium.launch(
+                args=[f"--host-resolver-rules=MAP *.trycloudflare.com {cloudflare_address()}"])
+        else:
+            # Safari's engine (webkit) has no resolver rules; use it with a local console URL.
+            browser = getattr(playwright, ENGINE).launch()
         yield browser
         browser.close()
 
@@ -135,7 +157,7 @@ def page(browser, link):
     page.on("response", lambda response: response.status >= 500 and "x-test-fault" not in response.headers
             and failed.append(f"{response.request.method} {response.url} -> {response.status}"))
     # A connection dropped without an answer (aborted ones are the page's or a test's doing).
-    page.on("requestfailed", lambda request: request.failure != "net::ERR_ABORTED" and failed.append(
+    page.on("requestfailed", lambda request: request.failure not in ABORTED and failed.append(
         f"{request.method} {request.url} -> {request.failure}"))
     yield page
     # Stop and close what this test opened, so the next one starts from the same list:
@@ -548,6 +570,101 @@ def test_the_x_archives_a_session_into_a_closed_archive_at_the_bottom_and_restor
     expect(list_item(page, first)).to_be_visible()
 
 
+def row_of(item):
+    return item.locator("xpath=..")
+
+
+def x_of(item):
+    return row_of(item).locator(".row-action")
+
+
+def x_showing(item):
+    return x_of(item).evaluate("button => getComputedStyle(button).opacity") == "1"
+
+
+def mouse_away(page):
+    """The mouse on the header, over no row."""
+    page.mouse.move(700, 20)
+
+
+def test_the_x_shows_only_while_the_mouse_is_over_its_row(page):
+    """It used to stay on the chosen session, and on a row after it was clicked."""
+    first = open_blank_session(page)
+    second = open_blank_session(page)
+    mouse_away(page)
+    assert not x_showing(list_item(page, first)) and not x_showing(list_item(page, second)), "an X shows with no mouse on it"
+
+    list_item(page, first).hover()
+    expect(x_of(list_item(page, first))).to_have_css("opacity", "1")
+    assert not x_showing(list_item(page, second))
+
+    # Clicked, the row is chosen and has the focus; neither keeps its X once the mouse leaves.
+    list_item(page, first).click()
+    expect(list_item(page, first)).to_have_attribute("aria-current", "true")
+    mouse_away(page)
+    expect(x_of(list_item(page, first))).to_have_css("opacity", "0")
+    assert not x_showing(list_item(page, second))
+
+    list_item(page, second).hover()
+    expect(x_of(list_item(page, second))).to_have_css("opacity", "1")
+    assert not x_showing(list_item(page, first))
+
+    # An archived row's restore button works the same way.
+    x_of(list_item(page, first)).click()
+    archive_toggle(page).click()
+    restore = page.locator(f'[data-unarchive="{first}"]')
+    mouse_away(page)
+    expect(restore).to_have_css("opacity", "0")
+    list_item(page, first).hover()
+    expect(restore).to_have_css("opacity", "1")
+    restore.click()
+    expect(page.locator(f'[data-archive="{first}"]')).to_be_attached()
+
+
+def test_the_x_stays_under_a_still_mouse_while_the_list_refreshes(page):
+    """The list was rebuilt on every refresh; under a mouse that did not move, the new
+    row was not hovered, so the X went away until the mouse moved."""
+    session = open_blank_session(page)
+    list_item(page, session).hover()
+    expect(x_of(list_item(page, session))).to_have_css("opacity", "1")
+    page.evaluate("id => { window.hoveredRow = document.querySelector(`[data-session='${id}']`).parentElement; }",
+                  session)
+    # Refreshes, and a change to the list: another session comes in above it.
+    base = page.url.split("/console")[0]
+    page.request.post(base + "/v1/sessions", headers={"Origin": base})
+    page.wait_for_timeout(7000)
+    assert page.evaluate("id => window.hoveredRow.isConnected && "
+                         "document.querySelector(`[data-session='${id}']`).parentElement === window.hoveredRow", session), \
+        "the row under the mouse was replaced"
+    list_item(page, session).hover()
+    assert x_showing(list_item(page, session))
+
+
+def test_the_browser_entry_has_an_x_that_closes_its_tab(browser, page):
+    """The Browser entry stands for a tab no session shows (another program's, or one
+    opened by hand); it looked like a session with no X."""
+    driver = stealthbox_browser()
+    try:
+        tab = driver.contexts[0].new_page()
+        tab.goto("https://example.com/", wait_until="domcontentloaded")
+        tab.bring_to_front()
+        entry = page.get_by_test_id("browser-item")
+        expect(entry).to_contain_text("example.com", timeout=15000)
+        mouse_away(page)
+        expect(x_of(entry)).to_have_css("opacity", "0")
+        entry.hover()
+        expect(x_of(entry)).to_have_css("opacity", "1")
+        expect(x_of(entry)).to_have_attribute("title", "Close tab")
+        with tab.expect_event("close", timeout=15000):
+            x_of(entry).click()
+        expect(page.get_by_test_id("browser-item")).not_to_contain_text("example.com", timeout=15000)
+    finally:
+        driver.close()
+    base = page.url.split("/console")[0]
+    response = page.request.post(base + "/v1/browser/close", data={"tab": "not-a-tab"}, headers={"Origin": base})
+    assert response.status == 404, response.text()
+
+
 def test_the_archive_button_shows_without_hover_on_a_phone(browser, link):
     context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
     phone = context.new_page()
@@ -651,7 +768,7 @@ def test_show_it_live_brings_a_background_session_to_the_front_and_close_forgets
 
 def test_the_live_browser_view_follows_a_program_driving_the_browser_over_cdp(browser, page):
     """A scraper on its own CDP connection makes no session; the console still shows its tab, live."""
-    driver = browser.browser_type.connect_over_cdp(CDP_URL or json.loads(stealthbox("status", "--json"))["cdp_url"])
+    driver = stealthbox_browser()
     tab = driver.contexts[0].new_page()
     try:
         tab.goto("https://example.com/", wait_until="domcontentloaded")
@@ -677,7 +794,7 @@ def test_show_it_live_on_a_session_whose_tab_was_closed_says_so(browser, page):
     bringing it to the front used to answer yes and show nothing."""
     session = open_blank_session(page)
     tab = api_get(page, f"/v1/sessions/{session}")["tab"]
-    driver = browser.browser_type.connect_over_cdp(CDP_URL or json.loads(stealthbox("status", "--json"))["cdp_url"])
+    driver = stealthbox_browser()
     try:
         cdp = driver.new_browser_cdp_session()
         cdp.send("Target.closeTarget", {"targetId": tab})
@@ -756,7 +873,7 @@ def test_the_sidebar_button_hides_the_sessions_and_it_stays_hidden_after_a_refre
 
 
 def typed_into_the_browser(browser, marker):
-    driver = browser.browser_type.connect_over_cdp(CDP_URL or json.loads(stealthbox("status", "--json"))["cdp_url"])
+    driver = stealthbox_browser()
     try:
         tab = next(item for item in driver.contexts[0].pages if marker in item.url)
         return tab.evaluate("document.getElementById('t').value")
