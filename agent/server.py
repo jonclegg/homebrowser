@@ -18,7 +18,8 @@
     GET  /v1/sessions                every session: status, latest screenshot, the conversation
     GET  /v1/sessions/{session}
     POST /v1/sessions/{session}/focus  bring its tab to the front, so the live view shows it
-    GET  /v1/browser/screenshot      a small JPEG of the live browser, for the console's preview
+    GET  /v1/browser/screenshot      a JPEG of the live browser, for the console's preview;
+                                     ?width= up to 1920 (default 320)
     GET  /v1/browser/history?q=      addresses from the browser's history, for the address bar
     POST /v1/browser/navigate        {"url": "...", "session": null}: load what was typed in the
                                      console's address bar in the session's tab, or the tab in front
@@ -109,6 +110,7 @@ SHARE_METRICS = os.environ.get("STEALTHBOX_SHARE_METRICS", "http://share:20241")
 SHARE_URL_SECONDS = 60
 # The console's live preview of the browser, in the sidebar.
 PREVIEW_WIDTH = 320
+MAX_PREVIEW_WIDTH = 1920
 BROWSER_START_SECONDS = 300
 SESSION_IDLE_SECONDS = int(os.environ.get("STEALTHBOX_SESSION_IDLE_SECONDS", "1800"))
 # How long a run waits for a tab handed to it ("tab") to reach Playwright.
@@ -1074,7 +1076,8 @@ def make_handler(stealthbox, token):
                 text = parse_qs(urlparse(self.path).query).get("q", [""])[0]
                 return self._send(200, {"suggestions": agent.history_suggestions(text) if text.strip() else []})
             if parts == ["v1", "browser", "screenshot"]:
-                return self._send_image(agent.display_thumbnail(PREVIEW_WIDTH))
+                width = int(parse_qs(urlparse(self.path).query).get("width", [PREVIEW_WIDTH])[0])
+                return self._send_image(agent.display_thumbnail(min(width, MAX_PREVIEW_WIDTH)))
             if parts == ["v1", "status"]:
                 return self._send(200, stealthbox.status())
             if parts == ["v1", "devices"]:

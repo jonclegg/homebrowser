@@ -576,6 +576,19 @@ def test_the_sidebar_shows_a_live_preview_of_the_browser(page):
     expect(preview).not_to_have_attribute("src", first)
 
 
+
+def test_the_live_view_shows_the_screen_while_it_connects(page):
+    # Hold the live view's websocket open without connecting, as on a slow share link.
+    page.route_web_socket("**/viewer/websockify", lambda websocket: None)
+    page.reload()
+    page.get_by_test_id("browser-item").click()
+    poster = page.get_by_test_id("poster")
+    expect(poster).to_be_visible()
+    expect(poster).to_have_attribute("src", re.compile(r"/v1/browser/screenshot\?width=\d+"))
+    page.wait_for_function("() => { const i = document.querySelector('[data-testid=poster]'); "
+                           "return i.complete && i.naturalWidth > 320; }")
+    expect(page.get_by_test_id("live-view")).not_to_have_attribute("data-connected", "true")
+
 POPUP_PAGE = ("data:text/html,<title>Course list</title><button style='font-size:48px;margin:80px' onclick=\"setTimeout(()=>{"
               "const w=window.open('','course','width=900,height=650');w.document.write('<title>Course player</title>"
               "<h1 style=font-size:64px>Course player ready</h1>')},1500)\">Open course</button>")

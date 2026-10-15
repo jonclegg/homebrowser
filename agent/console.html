@@ -118,6 +118,8 @@ body.expanded .viewport { flex: 1 1 auto; height: auto; }
 .viewport { flex: 1; min-height: 0; position: relative; background: #0A0B0E; }
 .viewport > div, .viewport > img { position: absolute; inset: 0; width: 100%; height: 100%; }
 .viewport > img { object-fit: contain; object-position: center; }
+/* the screen as it was a moment ago, under the live view until its first frame covers it */
+#poster { z-index: 0; } #live { z-index: 1; }
 /* the field a touch screen types into; its keys go to the live browser */
 .viewport > .keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; }
 
@@ -398,6 +400,7 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
           <button class="btn small" type="button" data-act="focus" id="s-focus" data-testid="show-live">Show it live</button>
         </div>
         <div class="viewport">
+          <img id="poster" alt="" hidden data-testid="poster">
           <div id="live" hidden data-testid="live-view"></div>
           <input class="keys" id="s-keys" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type into the browser" data-testid="keyboard-input">
           <img id="still" alt="" hidden data-testid="still-view">
@@ -748,7 +751,7 @@ function renderBrowser() {
   // Yours to click and type in, unless a run is driving the tab in front.
   const driven = sessions.some((other) => other.state === 'working' && other.in_front);
   showUrl(tab?.url || '', Boolean(tab) && !driven);
-  $('live').hidden = false;
+  showLive(true);
   $('s-driving').hidden = driven;
   connectLive(driven);
   $('s-now').className = 'now ' + (busy ? 'working' : 'done');
@@ -820,7 +823,7 @@ function renderSession() {
   tag.className = 'tag' + (live ? ' live' : '');
   tag.lastElementChild.textContent = !live ? 'Last screenshot' : s.in_front ? 'Live' : 'Live · another tab in front';
   showUrl(liveUrl(s) || s.url || 'about:blank', Boolean(s.tab) && !['working', 'waiting'].includes(s.state));
-  $('live').hidden = !live;
+  showLive(live);
   if (!live) $('s-keyboard').hidden = true;
   $('still').hidden = live || !s.shot_url;
   if (!live && s.shot_url && $('still').getAttribute('src') !== s.shot_url) $('still').src = s.shot_url;
@@ -1043,8 +1046,20 @@ $('s-keys').addEventListener('input', () => {
   keys.value = '';
 });
 
+function showLive(shown) {
+  $('live').hidden = !shown;
+  $('poster').hidden = !shown;
+}
+
+// noVNC takes a moment to connect, longer through the share, and its screen is blank
+// until then. A picture of the display sits under it meanwhile; the first frame,
+// the same display at the same scale, covers it exactly.
 function connectLive(viewOnly) {
   if (!rfb) {
+    const width = Math.round($('live').clientWidth * devicePixelRatio) || 1280;
+    const next = new Image();
+    next.onload = () => { $('poster').src = next.src; };
+    next.src = `/v1/browser/screenshot?width=${width}&t=${Date.now()}`;
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     rfb = new RFB($('live'), `${scheme}://${location.host}/viewer/websockify`);
     rfb.scaleViewport = true;
