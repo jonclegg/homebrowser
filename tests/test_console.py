@@ -123,10 +123,17 @@ def page(browser, link):
     base = link.split("/console")[0]
     before = {s["session"] for s in context.request.get(base + "/v1/sessions").json()["sessions"]}
     yield page
-    # Close what this test opened, so the next one starts from the same list.
-    for session in context.request.get(base + "/v1/sessions").json()["sessions"]:
-        if session["session"] not in before and session["state"] not in ("working", "paused", "waiting"):
-            context.request.post(f"{base}/v1/sessions/{session['session']}/close")
+    # Stop and close what this test opened, so the next one starts from the same list:
+    # a run a failed test left going (or paused) holds the one browser worker.
+    opened = [s["session"] for s in context.request.get(base + "/v1/sessions").json()["sessions"]
+              if s["session"] not in before]
+    deadline = time.time() + RUN_SECONDS
+    for session in opened:
+        while run := context.request.get(f"{base}/v1/sessions/{session}").json()["running_run"]:
+            assert time.time() < deadline, f"session {session} never stopped"
+            context.request.post(f"{base}/v1/runs/{run}/cancel")
+            time.sleep(2)
+        context.request.post(f"{base}/v1/sessions/{session}/close")
     context.close()
 
 
@@ -296,8 +303,10 @@ def test_a_follow_up_queues_behind_the_run_and_stays_in_the_same_tab(page):
 
 
 def test_take_over_holds_the_run_and_hand_back_resumes_it_then_stop(page):
-    start_session(page, "Go to wikipedia.org, search for Austin, Texas, open the article, "
-                        "and tell me the population in the infobox and the name of the mayor.")
+    # Long enough that the run is still going when the test stops it.
+    start_session(page, "Go to wikipedia.org, search for Austin, Texas, open the article, then open "
+                        "the article of each of the ten largest cities in Texas one by one, and tell "
+                        "me the population in each infobox and the name of each mayor.")
     expect(status(page)).to_have_text("Working", timeout=RUN_TIMEOUT)
     page.wait_for_function("() => document.querySelectorAll('[data-testid=steps] li').length >= 1",
                            timeout=RUN_TIMEOUT)

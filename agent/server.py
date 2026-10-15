@@ -13,7 +13,7 @@
     POST /v1/smoke                   {"sites": [...], "wait": true}: reach a few sites
                                      and screenshot them (report.html in <data>/smoke/)
     GET  /v1/smoke/{id}
-    POST /v1/runs/{run}/pause        hold the run after its current step, so the user can drive
+    POST /v1/runs/{run}/pause        hold the run after its current step and bring its tab to the front, so the user can drive
     POST /v1/runs/{run}/resume
     GET  /v1/sessions                every session: status, latest screenshot, the conversation
     GET  /v1/sessions/{session}
@@ -430,6 +430,9 @@ class Stealthbox:
         """Hold a running run after its current step (the user takes over), or let it go on."""
         if run.status != "running" or run.turn is None:
             raise RuntimeError(f"run {run.id} is {run.status}; only a running run can pause")
+        if paused:
+            # The user takes over in the live view, which shows the tab in front.
+            agent.activate_tab(run.session.target_id)
         run.paused = paused
         run.turn.paused = paused
         self.events.publish("run.paused" if paused else "run.resumed", run=run.id, session=run.session.id)
@@ -480,7 +483,13 @@ class Stealthbox:
         return url
 
     def focus(self, session):
-        """Bring the session's tab to the front, after the run in progress if there is one."""
+        """Bring the session's tab to the front, after the run in progress if there is one.
+        A paused run holds the browser thread until the user hands back, so its tab
+        comes to the front at once."""
+        if session.state() == "paused":
+            agent.activate_tab(session.target_id)
+            self.events.publish("session.focused", session=session.id)
+            return
         def chore(context):
             if session.page is not None and not session.page.is_closed():
                 session.page.bring_to_front()

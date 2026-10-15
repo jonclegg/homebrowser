@@ -809,10 +809,10 @@ function renderSession() {
   // its tab is in front: another program sharing the browser (the FSD finder) brings
   // its own tabs there, even while a run works. Otherwise show the session's last
   // screenshot, or the live view while there is none yet (a blank panel looks like
-  // a dead screen), labelled as another tab.
-  const driving = ['working', 'paused'].includes(s.state);
+  // a dead screen), labelled as another tab. Taking over brings the tab to the front.
+  const driving = s.state === 'working';
   const live = s.in_front || !s.shot_url;
-  const interactive = (s.in_front || s.state === 'paused') && ['needs', 'paused', 'done', 'stopped'].includes(s.state);
+  const interactive = s.in_front && ['needs', 'paused', 'done', 'stopped'].includes(s.state);
   $('s-browser').classList.toggle('mine', interactive && !needs);
   $('s-browser').classList.toggle('needs', needs);
   $('s-driving').hidden = !interactive || needs || s.state === 'paused';
@@ -831,8 +831,11 @@ function renderSession() {
   $('s-still-text').textContent = busyElsewhere
     ? `The browser is working on ${title(busyElsewhere)}. The live view comes back when it is done.`
     : driving ? `${inFront} is in front. This is the run's last screenshot; it brings its tab back on its next step.`
+    : s.state === 'paused' ? `${inFront} is in front. Bring this tab back to the front to take over in it.`
     : 'Showing the last screenshot. Bring this tab to the front to see it live.';
+  // A hidden live view takes no input, so it is view-only too.
   if (live) connectLive(!interactive);
+  else if (rfb) connectLive(true);
 
   renderNow(s, busyElsewhere);
   renderThread(s);

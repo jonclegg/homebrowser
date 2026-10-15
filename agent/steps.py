@@ -385,6 +385,13 @@ def navigate_tab(target_id, url):
         _command(socket, 4, "Target.detachFromTarget", {"sessionId": session})
 
 
+def activate_tab(target_id):
+    """Bring a tab to the front from the browser side, without Playwright: the
+    server's browser thread is busy while a run holds for the user."""
+    with _browser_socket() as socket:
+        _command(socket, 1, "Target.activateTarget", {"targetId": target_id})
+
+
 def close_target(target_id):
     """Close a tab from the browser side, which works even when its renderer is hung."""
     with _browser_socket() as socket:
@@ -1350,7 +1357,8 @@ def _run_steps(page, turn, on_step, on_phase):
         record = {
             "step": step,
             "url": url,
-            # The tab this step ran in: `open` can land in a new one.
+            # The tab the step leaves the run in, set again after the action: `open`
+            # can land in a new one, and the console follows the run there.
             "tab": humanize.target_id(page),
             "observation": decision.get("observation"),
             "action": decision.get("action"),
@@ -1394,6 +1402,7 @@ def _run_steps(page, turn, on_step, on_phase):
             record["did"], page = execute(page, decision, turn)
         except Exception as exc:  # noqa: BLE001 - one bad action should not end the turn
             record["did"] = f"action failed: {str(exc)[:200]}"
+        record["tab"] = humanize.target_id(page)
         if repeats_without_progress(turn.steps, record):
             # Run 7 lost two sites this way: the same click 20 times over.
             record["did"] += (" (the same action at the same place as your last two steps, on the "
