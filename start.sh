@@ -118,7 +118,7 @@ elif ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   if [ "$(uname)" = "Darwin" ]; then
     fail "OrbStack is not installed, and no container engine is running.
 On a Mac, install Stealthbox with one command:
-  gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
+  curl -fsSL https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.sh | sh
 Or install OrbStack, open it, then run this again:
   https://orbstack.dev/download"
   fi
@@ -157,13 +157,6 @@ if [ "$(uname -s)" = "Darwin" ] && ! grep -qE '^COMPOSE_FILE=' .env; then
 fi
 
 echo "1/3 Building Stealthbox (the first time takes several minutes)..."
-# The browser core release is private: the build reads it with GITHUB_TOKEN,
-# by default the signed-in gh's.
-if [ -z "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
-  GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
-  export GITHUB_TOKEN
-fi
-[ -n "${GITHUB_TOKEN:-}" ] || fail "Building Stealthbox needs GITHUB_TOKEN, or gh signed in (gh auth login), to read the private browser core release."
 docker compose build --quiet stealthbox
 
 echo "2/3 Starting the browser..."

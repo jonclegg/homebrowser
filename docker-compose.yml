@@ -10,10 +10,6 @@ services:
       # e.g. a local `python3 -m http.server` over browser/dist.
       args:
         - FURY_CORE_URL
-      # The core release is private: GITHUB_TOKEN (start.sh takes it from
-      # `gh auth token`) must be able to read jonclegg/stealthbox.
-      secrets:
-        - github_token
     image: ${STEALTHBOX_IMAGE:-stealthbox:local}
     container_name: stealthbox
     hostname: stealthbox
@@ -77,7 +73,3 @@ services:
 volumes:
   profile:
   cache:
-
-secrets:
-  github_token:
-    environment: GITHUB_TOKEN

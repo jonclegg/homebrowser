@@ -45,10 +45,6 @@ if (-not $env:STEALTHBOX_DATA_DIR) { $env:STEALTHBOX_DATA_DIR = Join-Path $HOME 
 New-Item -ItemType Directory -Force -Path $env:STEALTHBOX_DATA_DIR | Out-Null
 
 Write-Host "1/3 Building Stealthbox (the first time takes several minutes)..."
-# The browser core release is private: the build reads it with GITHUB_TOKEN,
-# by default the signed-in gh's.
-if (-not $env:GITHUB_TOKEN -and (Get-Command gh -ErrorAction SilentlyContinue)) { $env:GITHUB_TOKEN = (gh auth token) }
-if (-not $env:GITHUB_TOKEN) { Fail "Building Stealthbox needs GITHUB_TOKEN, or gh signed in (gh auth login), to read the private browser core release." }
 Invoke-Docker compose build --quiet stealthbox
 
 Write-Host "2/3 Starting the browser..."

@@ -367,8 +367,8 @@ cookie, and the site stops challenging for a while.
 - **No container engine:** the installer changes nothing and exits 3 after a line `STEALTHBOX_NEEDS: docker` naming what it would install. Ask the user; with their yes, run it again with `STEALTHBOX_INSTALL_DOCKER=yes` (PowerShell: `$env:STEALTHBOX_INSTALL_DOCKER = "yes"`). Exit 4 after `STEALTHBOX_NEEDS: user` is a step only the user can do (a sudo password, Docker Desktop's first-run setup, logging in again); relay it and run the installer again afterwards.
 - **Mac:** uses OrbStack if it's installed, else a Docker engine that's already running (Docker Desktop, Colima). With neither and consent, it installs OrbStack on macOS 14+ (Homebrew, or opens https://orbstack.dev/download and waits); on older macOS it explains how to install Colima or Docker Desktop. Stealthbox selects OrbStack per command (`DOCKER_CONTEXT`) and never changes your default Docker context.
 - **Linux (amd64 or arm64):** uses Docker Engine with the Compose plugin. With consent it installs it with Docker's script (`get.docker.com`), starts it, adds the user to the `docker` group, and grants the socket for the current session (installing `acl` if needed) so no re-login is required.
-- **Windows:** `gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex` in PowerShell. Needs Docker Desktop running Linux containers (WSL 2); with consent it installs it with `winget` and starts it. Works in Windows PowerShell 5.1 and PowerShell 7. <!-- pragma: allowlist secret -->
-- **Image:** `stealthbox start` builds it on this computer from this folder (nothing is published), from [`image/Dockerfile`](../../image/Dockerfile) with the repository as context. The browser core is prebuilt ([`browser/cloud`](../../browser/cloud)) and downloaded from this repository's private release with `GITHUB_TOKEN`, by default `gh auth token`. The first start downloads a GeoIP database into the `cache` volume.
+- **Windows:** `irm https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.ps1 | iex` in PowerShell. Needs Docker Desktop running Linux containers (WSL 2); with consent it installs it with `winget` and starts it. Works in Windows PowerShell 5.1 and PowerShell 7. <!-- pragma: allowlist secret -->
+- **Image:** `stealthbox start` builds it on this computer from this folder (nothing is published), from [`image/Dockerfile`](../../image/Dockerfile) with the repository as context. The browser core is prebuilt ([`browser/cloud`](../../browser/cloud)) and downloaded from this repository's release. The first start downloads a GeoIP database into the `cache` volume.
 - `STEALTHBOX_TARBALL_URL` (`STEALTHBOX_ZIP_URL` on Windows) installs from another archive, such as a fork or a tag.
 
 ### Settings
@@ -416,7 +416,7 @@ Prerequisites:
 Install:
 
 ```bash
-gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
+curl -fsSL https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.sh | sh
 ```
 
 From a clone, once Docker is working:
@@ -434,7 +434,7 @@ The browser runs headed on Xvfb inside the image, so a server needs no monitor. 
 Browser and viewer run on Windows with Docker Desktop (WSL 2, Linux containers).
 
 1. Install [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/), restart, wait for **Engine running**.
-2. In PowerShell: `gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex` <!-- pragma: allowlist secret -->
+2. In PowerShell: `irm https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.ps1 | iex` <!-- pragma: allowlist secret -->
 3. Later: `& "$HOME\.stealthbox\app\start.ps1"` to start, `& "$HOME\.stealthbox\app\stop.ps1"` to stop. (In a fresh session where scripts are blocked: `powershell -ExecutionPolicy Bypass -File "$HOME\.stealthbox\app\start.ps1"`.)
 4. Commands: `docker exec stealthbox stealthbox status | key | smoke | chat "..."`. `key` prints a link to open on this machine; `smoke` writes its report to `~\.stealthbox\data\smoke\`.
 

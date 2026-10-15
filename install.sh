@@ -1,9 +1,6 @@
 #!/bin/sh
 # One-step install or update for macOS and Linux:
-#   gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
-#
-# The repository is private, so the GitHub CLI must be signed in (gh auth login);
-# the image build reads the browser core release with the same login.
+#   curl -fsSL https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.sh | sh
 #
 # POSIX sh (runs under dash, BusyBox ash, bash and zsh). Everything is inside main(), so a
 # partially downloaded script never runs. The app lives in ~/.stealthbox/app and is replaced
@@ -21,7 +18,7 @@
 # only the user can do (a sudo password, a log out and in); it says which.
 set -eu
 
-TARBALL_URL="${STEALTHBOX_TARBALL_URL:-}"
+TARBALL_URL="${STEALTHBOX_TARBALL_URL:-https://github.com/jonclegg/stealthbox/archive/refs/heads/main.tar.gz}"
 STATE_DIR="${HOME:-}/.stealthbox"
 INSTALL_DIR="${STATE_DIR}/app"
 ORBSTACK_DOWNLOAD="https://orbstack.dev/download"
@@ -35,7 +32,7 @@ fail() {
 # No container engine and no consent to install one: change nothing, say what
 # would be installed, and let the agent ask the user.
 needs_docker() {
-  printf '\nSTEALTHBOX_NEEDS: docker\n%s\n\nTo install it, run this installer again with STEALTHBOX_INSTALL_DOCKER=yes:\n  gh api repos/jonclegg/stealthbox/contents/install.sh -H "Accept: application/vnd.github.raw" | STEALTHBOX_INSTALL_DOCKER=yes sh\n\n' "$1" >&2
+  printf '\nSTEALTHBOX_NEEDS: docker\n%s\n\nTo install it, run this installer again with STEALTHBOX_INSTALL_DOCKER=yes:\n  curl -fsSL https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.sh | STEALTHBOX_INSTALL_DOCKER=yes sh\n\n' "$1" >&2
   exit 3
 }
 
@@ -75,11 +72,9 @@ preflight() {
   [ -n "${HOME:-}" ] || fail "HOME is not set."
   if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
     fail "Run the installer as yourself, not with sudo:
-  gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh"
+  curl -fsSL https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.sh | sh"
   fi
   need curl "Install curl, then run this again."
-  need gh "Install the GitHub CLI (https://cli.github.com) and sign in with gh auth login: Stealthbox is a private repository."
-  gh auth status >/dev/null 2>&1 || fail "Sign in to the GitHub CLI first (gh auth login): Stealthbox is a private repository."
   need tar "Install tar, then run this again."
   need mktemp "Install coreutils, then run this again."
 }
@@ -326,11 +321,7 @@ install_app() {
   # Stage inside STATE_DIR so the final swap is a same-filesystem rename.
   stage="$(mktemp -d "${STATE_DIR}/.download.XXXXXX")"
   say "Downloading Stealthbox..."
-  if [ -n "$TARBALL_URL" ]; then
-    curl -fsSL --retry 3 --connect-timeout 30 --max-time 600 -o "${stage}/app.tar.gz" "$TARBALL_URL"
-  else
-    gh api repos/jonclegg/stealthbox/tarball/main > "${stage}/app.tar.gz"
-  fi
+  curl -fsSL --retry 3 --connect-timeout 30 --max-time 600 -o "${stage}/app.tar.gz" "$TARBALL_URL"
   mkdir "${stage}/x"
   tar -xzf "${stage}/app.tar.gz" -C "${stage}/x"
   new=""
@@ -341,7 +332,7 @@ install_app() {
   done
   if [ -z "$new" ]; then
     rm -rf "$stage"
-    fail "The download from ${TARBALL_URL:-jonclegg/stealthbox} doesn't look like Stealthbox."
+    fail "The download from ${TARBALL_URL} doesn't look like Stealthbox."
   fi
   if [ -f "${INSTALL_DIR}/.env" ]; then
     cp -p "${INSTALL_DIR}/.env" "${new}/.env"

@@ -8,18 +8,18 @@ When the user points you at this repo, install it for them. They should not have
 
 **1. Already installed?** Run `stealthbox status --json`. If it prints `"ready": true`, `"openrouter_key": true` and `"console_password": true`, skip to step 5. If only `console_password` is `false`, run `stealthbox password` (the user sets it on the page it opens), then skip to step 5.
 
-**2. Run the installer.** It downloads Stealthbox, builds its image on this computer, and starts it. The build downloads the prebuilt browser core from this repository's private release with the GitHub CLI's login, so `gh` must be signed in (`gh auth status`).
+**2. Run the installer.** It downloads Stealthbox, builds its image on this computer, and starts it. The build downloads the prebuilt browser core from this repository's release.
 
 macOS or Linux:
 
 ```bash
-gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
+curl -fsSL https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex
+irm https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.ps1 | iex
 ```
 
 The first run takes several minutes. It builds the image (about 2 GB, browser included), and on first start the container downloads a GeoIP database.
@@ -27,11 +27,11 @@ The first run takes several minutes. It builds the image (about 2 GB, browser in
 **3. If it stops with `STEALTHBOX_NEEDS: docker`** (exit code 3), the computer has no container engine, and the installer changed nothing. **Ask the user** whether to install one, and say which one the output names: OrbStack on a Mac, Docker Engine on Linux, Docker Desktop on Windows. If they agree, run the installer again with consent:
 
 ```bash
-gh api repos/jonclegg/stealthbox/contents/install.sh -H 'Accept: application/vnd.github.raw' | STEALTHBOX_INSTALL_DOCKER=yes sh
+curl -fsSL https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.sh | STEALTHBOX_INSTALL_DOCKER=yes sh
 ```
 
 ```powershell
-$env:STEALTHBOX_INSTALL_DOCKER = "yes"; gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex
+$env:STEALTHBOX_INSTALL_DOCKER = "yes"; irm https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.ps1 | iex
 ```
 
 If it stops with `STEALTHBOX_NEEDS: user` (exit code 4), it needs something only the user can do. Examples: typing a sudo password in their own terminal, finishing Docker Desktop's first-run setup, or logging out and back in. Relay the message as it is, wait until they say it's done, then run the installer again.

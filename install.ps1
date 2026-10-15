@@ -1,7 +1,5 @@
 # One-step install or update for Windows (Docker Desktop with WSL 2), in PowerShell:
-#   gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex
-#
-# The repository is private, so the GitHub CLI must be signed in (gh auth login).
+#   irm https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.ps1 | iex
 #
 # Works in Windows PowerShell 5.1 and PowerShell 7. The app lives in ~\.stealthbox\app and is
 # replaced wholesale from a GitHub zip on every run; the previous copy is kept in
@@ -46,7 +44,7 @@ function Install-DockerDesktop {
             "It would install Docker Desktop with winget (Windows asks for administrator approval):`n" +
             "  winget install -e --id Docker.DockerDesktop`n`n" +
             "To install it, run the installer again with:`n" +
-            "  `$env:STEALTHBOX_INSTALL_DOCKER = `"yes`"; gh api repos/jonclegg/stealthbox/contents/install.ps1 -H 'Accept: application/vnd.github.raw' | iex")
+            "  `$env:STEALTHBOX_INSTALL_DOCKER = `"yes`"; irm https://raw.githubusercontent.com/jonclegg/stealthbox/main/install.ps1 | iex")
     }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Needs "user" "winget is not available here. Install Docker Desktop from https://docs.docker.com/desktop/setup/install/windows-install/, open it once, then run the installer again."
@@ -74,7 +72,7 @@ function Start-DockerDesktop {
 
 function Install-Stealthbox {
     $zipUrl = $env:STEALTHBOX_ZIP_URL
-    if (-not $zipUrl -and -not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail "Install the GitHub CLI (https://cli.github.com) and sign in with gh auth login: Stealthbox is a private repository." }
+    if (-not $zipUrl) { $zipUrl = "https://github.com/jonclegg/stealthbox/archive/refs/heads/main.zip" }
     $stateDir = Join-Path $HOME ".stealthbox"
     $installDir = Join-Path $stateDir "app"
 
@@ -109,8 +107,7 @@ function Install-Stealthbox {
     try {
         Write-Host "Downloading Stealthbox..."
         $zip = Join-Path $stage "app.zip"
-        if ($zipUrl) { Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing }
-        else { gh api repos/jonclegg/stealthbox/zipball/main > $zip; if ($LASTEXITCODE -ne 0) { Fail "Could not download Stealthbox with the GitHub CLI; sign in with gh auth login." } }
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
         Expand-Archive -Path $zip -DestinationPath (Join-Path $stage "x")
         $new = Get-ChildItem -Path (Join-Path $stage "x") -Directory |
             Where-Object { (Test-Path (Join-Path $_.FullName "start.ps1")) -and (Test-Path (Join-Path $_.FullName "docker-compose.yml")) } |

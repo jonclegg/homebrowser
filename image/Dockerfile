@@ -1,7 +1,7 @@
 # Stealthbox's image, built from the repository root by `stealthbox start`
 # (docker-compose.yml). Everything comes from this repository except the browser
 # core, which is prebuilt (browser/cloud) and downloaded from this repository's
-# private releases.
+# releases.
 FROM python:3.12-slim
 
 # Chromium's system libraries and fonts, the X display (Xvfb, openbox, xdotool),
@@ -47,9 +47,7 @@ RUN curl -fsSL --retry 3 -o /usr/local/bin/cloudflared \
 # The browser: Fury's patched Chromium (browser/), built for Linux by
 # browser/cloud/build-release.sh. cdp-server runs the pool, GeoIP and native
 # input; STEALTHBOX_BINARY_PATH makes it launch launch-browser, which hands the
-# core a persona config. The release is private, so the core comes through the
-# GitHub API with a token passed as a build secret, which never lands in the image:
-#   docker build --secret id=github_token,env=GITHUB_TOKEN ...
+# core a persona config. It comes from this repository's release unless
 # FURY_CORE_URL, when set, takes the tarballs from there instead (a local
 # `python3 -m http.server` over browser/dist, for unreleased cores).
 ARG FURY_CORE_REPO=jonclegg/stealthbox
@@ -57,8 +55,7 @@ ARG FURY_CORE_TAG=core-155.0.8059.12-linux.1
 ARG FURY_CORE_URL=
 ARG FURY_CORE_SHA256_AMD64=955a999a40e15d34f8637b3ded335bee934fd6c9485735b4bf1c8380ef739609
 ARG FURY_CORE_SHA256_ARM64=9a12551d89d192ef53a4059bb0164c6be607c5c8dd92bfdcab61427d608fd706
-RUN --mount=type=secret,id=github_token \
-    case "$TARGETARCH" in \
+RUN case "$TARGETARCH" in \
          amd64) arch=x64; sha="$FURY_CORE_SHA256_AMD64" ;; \
          arm64) arch=arm64; sha="$FURY_CORE_SHA256_ARM64" ;; \
        esac \
@@ -66,12 +63,7 @@ RUN --mount=type=secret,id=github_token \
     && if [ -n "$FURY_CORE_URL" ]; then \
          curl -fsSL --retry 3 -o /tmp/fury-core.tar.xz "$FURY_CORE_URL/$name"; \
        else \
-         { test -s /run/secrets/github_token || { echo "the core release is private: build with --secret id=github_token,env=GITHUB_TOKEN" >&2; exit 1; }; } \
-         && auth="Authorization: Bearer $(cat /run/secrets/github_token)" \
-         && curl -fsSL --retry 3 -H "$auth" -o /tmp/release.json "https://api.github.com/repos/$FURY_CORE_REPO/releases/tags/$FURY_CORE_TAG" \
-         && asset="$(python3 -c 'import json, sys; print(next(a["url"] for a in json.load(open("/tmp/release.json"))["assets"] if a["name"] == sys.argv[1]))' "$name")" \
-         && curl -fsSL --retry 3 -H "$auth" -H "Accept: application/octet-stream" -o /tmp/fury-core.tar.xz "$asset" \
-         && rm /tmp/release.json; \
+         curl -fsSL --retry 3 -o /tmp/fury-core.tar.xz "https://github.com/$FURY_CORE_REPO/releases/download/$FURY_CORE_TAG/$name"; \
        fi \
     && echo "$sha  /tmp/fury-core.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/fury-core.tar.xz -C /opt \
