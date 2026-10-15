@@ -75,6 +75,7 @@ import queue
 import re
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -472,8 +473,8 @@ class Stealthbox:
             return None
         try:
             return agent.front_tab()
-        except OSError:
-            # The browser went away since the check above.
+        except (OSError, subprocess.SubprocessError):
+            # The browser or the display went away since the check above.
             return None
 
     def navigate(self, text, session):
@@ -505,6 +506,8 @@ class Stealthbox:
         A paused run holds the browser thread until the user hands back, so its tab
         comes to the front at once."""
         session.last_used = time.time()
+        if session.target_id and session.target_id not in {tab["id"] for tab in agent.page_targets()}:
+            raise LookupError(f"session {session.id}'s tab was closed")
         if session.state() == "paused":
             agent.activate_tab(session.target_id)
             self.events.publish("session.focused", session=session.id)
@@ -757,7 +760,7 @@ class Stealthbox:
         run.phase = {"phase": phase, "text": text, "reason": reason, "since_ms": int(time.time() * 1000)}
         self.events.publish("run.phase", run=run.id, session=run.session.id, **run.phase)
 
-    def _expire_sessions(self):
+    def _expire_sessions(self, context):
         cutoff = time.time() - SESSION_IDLE_SECONDS
         # The tab in front is the one the user is looking at, perhaps browsing in it
         # by hand, which no request to the API shows.
@@ -768,8 +771,9 @@ class Stealthbox:
             for session in stale:
                 del self.sessions[session.id]
         for session in stale:
-            if session.page is not None and not session.borrowed and not session.page.is_closed():
-                session.page.close()
+            page = None if session.borrowed else self._session_page(context, session)
+            if page is not None:
+                page.close()
             self.events.publish("session.expired", session=session.id)
 
     def _borrowed_page(self, context, target_id):
@@ -793,8 +797,8 @@ class Stealthbox:
             run.status = "cancelled"
             run.reply = "Cancelled before it started."
             return
-        self._expire_sessions()
         context = self._connect(playwright)
+        self._expire_sessions(context)
         session = run.session
         if session.page is None and session.borrowed:
             session.page = self._borrowed_page(context, session.target_id)
@@ -1045,6 +1049,7 @@ def make_handler(stealthbox, token):
                         response += chunk
                     head, _, rest = response.partition(b"\r\n\r\n")
                     lines = [line for line in head.split(b"\r\n") if not line.lower().startswith(b"connection:")]
+                    self._responded = True
                     self.connection.sendall(b"\r\n".join([*lines, b"Connection: close"]) + b"\r\n\r\n" + rest)
                     while chunk := upstream.recv(65536):
                         self.connection.sendall(chunk)
@@ -1064,6 +1069,7 @@ def make_handler(stealthbox, token):
                         pass
 
             pump = threading.Thread(target=to_client, daemon=True)
+            self._responded = True
             pump.start()
             try:
                 while chunk := self.rfile.read1(65536):
@@ -1138,16 +1144,21 @@ def make_handler(stealthbox, token):
             self._responded = False
             try:
                 route()
-            except (BrokenPipeError, ConnectionResetError):
-                # The caller hung up before the answer was written.
-                return
             except BadRequest as exc:
                 self._send(400, {"error": str(exc)})
             except Exception as exc:  # noqa: BLE001 - the HTTP boundary
                 if self._responded:
+                    if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                        # The caller hung up partway through the answer.
+                        return
                     raise
+                # A reset here can be one of ours (cdp-server restarting), not the caller's.
                 traceback.print_exc()
-                self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+                try:
+                    self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+                except OSError:
+                    # The caller is gone too.
+                    return
 
         def do_GET(self):  # noqa: N802
             self._answer(self._get)
@@ -1292,11 +1303,13 @@ def make_handler(stealthbox, token):
                 return self._send(400, {"error": "since must be a non-negative event id"})
             since = int(since)
             if since > stealthbox.events.last_id():
-                # An id this stream never issued (Stealthbox restarted): replay what is held.
+                # An id this stream never issued (a clock that went back): replay what is held.
                 since = 0
             events, gap = stealthbox.events.after(since, EVENTS_POLL_SECONDS)
+            # With nothing new, the stream's own last id, so a caller never asks again
+            # for an id below it and gets an instant empty answer, over and over.
             return self._send(200, {"events": events, "gap": gap,
-                                    "last_id": events[-1]["id"] if events else since})
+                                    "last_id": events[-1]["id"] if events else max(since, stealthbox.events.last_id())})
 
         @staticmethod
         def _event_chunk(event):
