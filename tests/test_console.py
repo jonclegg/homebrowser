@@ -351,6 +351,141 @@ def test_the_message_box_button_stops_the_run_until_the_user_types(page):
     expect(page.get_by_test_id("send")).to_be_disabled()
 
 
+# ---------------------------------------------------------------- blank sessions and the archive
+
+
+def api_get(page, path):
+    return page.request.get(page.url.split("/console")[0] + path).json()
+
+
+def open_blank_session(page):
+    """Start a blank session from the console; returns its id once its tab is open and in front."""
+    before = [s["session"] for s in api_get(page, "/v1/sessions")["sessions"]]
+    page.get_by_test_id("new-blank").click()
+    page.wait_for_function("before => location.hash.startsWith('#s_') && !before.includes(location.hash.slice(1))",
+                           arg=before)
+    session = page.evaluate("location.hash.slice(1)")
+    deadline = time.time() + 30
+    while not api_get(page, f"/v1/sessions/{session}")["in_front"]:
+        assert time.time() < deadline, "the blank session's tab never came to the front"
+        time.sleep(0.5)
+    return session
+
+
+def archive_toggle(page):
+    return page.get_by_test_id("archive-toggle")
+
+
+def archive_from_the_list(page, session):
+    list_item(page, session).hover()
+    page.locator(f'[data-archive="{session}"]').click()
+
+
+def test_a_blank_session_opens_a_new_tab_to_browse_with_no_task(page):
+    session = open_blank_session(page)
+    expect(list_item(page, session)).to_have_attribute("data-state", "new")
+    expect(list_item(page, session)).to_contain_text("No messages yet")
+    expect(status(page)).to_have_text("New")
+    expect(page.get_by_test_id("session-title")).to_have_text("New session")
+    expect(page.get_by_test_id("blank-hint")).to_be_visible()
+    view = api_get(page, f"/v1/sessions/{session}")
+    assert view["messages"] == [] and view["tab"] == api_get(page, "/v1/status")["front_tab"]["id"]
+
+    # The user drives it: the mouse is theirs, and the address bar loads in this session's tab.
+    expect(page.get_by_test_id("live-view")).to_have_attribute("data-view-only", "false", timeout=15000)
+    url = page.get_by_test_id("url")
+    url.click()
+    url.press("ControlOrMeta+a")
+    url.type("example.com")
+    url.press("Enter")
+    expect(page.get_by_test_id("session-title")).to_have_text("example.com", timeout=15000)
+    expect(list_item(page, session)).to_contain_text("example.com")
+    assert api_get(page, "/v1/status")["front_tab"]["id"] == view["tab"]
+
+    page.get_by_test_id("close").click()
+    expect(list_item(page, session)).to_have_count(0)
+
+
+def test_the_x_archives_a_session_into_a_closed_archive_at_the_bottom_and_restore_brings_it_back(page):
+    first = open_blank_session(page)
+    second = open_blank_session(page)
+    expect(archive_toggle(page)).to_have_count(0)
+
+    # The button shows on hover, like a mail app's; archiving the session on screen moves off it.
+    expect(page.locator(f'[data-archive="{first}"]')).to_have_css("opacity", "0")
+    list_item(page, first).hover()
+    expect(page.locator(f'[data-archive="{first}"]')).to_have_css("opacity", "1")
+    archive_from_the_list(page, second)
+    expect(list_item(page, second)).to_have_count(0)
+    page.wait_for_function("second => location.hash.slice(1) !== second", arg=second)
+    assert api_get(page, f"/v1/sessions/{second}")["archived"] is True
+
+    # The archive is one closed line at the bottom of the list.
+    expect(archive_toggle(page)).to_have_attribute("aria-expanded", "false")
+    expect(archive_toggle(page)).to_contain_text("Archived")
+    expect(archive_toggle(page).locator(".count")).to_have_text("1")
+    rail = page.locator("nav.rail").bounding_box()
+    toggle = archive_toggle(page).bounding_box()
+    assert toggle["y"] > rail["y"] + rail["height"] / 2, (rail, toggle)
+
+    archive_toggle(page).click()
+    expect(archive_toggle(page)).to_have_attribute("aria-expanded", "true")
+    expect(page.get_by_test_id("archive").locator(f'[data-session="{second}"]')).to_be_visible()
+
+    # Still archived after a reload, and the archive starts closed again.
+    page.reload()
+    expect(page.get_by_test_id("events-state")).to_have_text("Live updates on", timeout=30000)
+    expect(archive_toggle(page)).to_have_attribute("aria-expanded", "false")
+    expect(list_item(page, second)).to_have_count(0)
+    expect(list_item(page, first)).to_be_visible()
+
+    # An archived session opens from the archive, and Unarchive puts it back in the list.
+    archive_toggle(page).click()
+    list_item(page, second).click()
+    page.get_by_test_id("unarchive").click()
+    expect(archive_toggle(page)).to_have_count(0)
+    expect(list_item(page, second)).to_be_visible()
+    assert api_get(page, f"/v1/sessions/{second}")["archived"] is False
+
+    # The restore button on an archived row does the same.
+    archive_from_the_list(page, first)
+    archive_toggle(page).click()
+    page.locator(f'[data-unarchive="{first}"]').click()
+    expect(archive_toggle(page)).to_have_count(0)
+    expect(list_item(page, first)).to_be_visible()
+
+
+def test_the_archive_button_shows_without_hover_on_a_phone(browser, link):
+    context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+    phone = context.new_page()
+    sign_in(phone, link)
+    base = link.split("/console")[0]
+    session = context.request.post(base + "/v1/sessions").json()["session"]
+    try:
+        phone.get_by_test_id("sidebar-toggle").click()
+        expect(phone.locator(f'[data-archive="{session}"]')).to_have_css("opacity", "1", timeout=15000)
+        phone.locator(f'[data-archive="{session}"]').tap()
+        expect(archive_toggle(phone)).to_be_visible()
+        assert phone.evaluate("document.documentElement.scrollWidth <= innerWidth"), "the phone page scrolls sideways"
+    finally:
+        context.request.post(f"{base}/v1/sessions/{session}/close")
+        context.close()
+
+
+def test_a_message_to_an_archived_session_brings_it_back(page):
+    session = open_blank_session(page)
+    archive_from_the_list(page, session)
+    archive_toggle(page).click()
+    list_item(page, session).click()
+    page.get_by_test_id("reply").fill("Open example.com and tell me the page's main heading.")
+    page.get_by_test_id("send").click()
+    expect(archive_toggle(page)).to_have_count(0)
+    expect(list_item(page, session)).to_be_visible()
+    assert api_get(page, f"/v1/sessions/{session}")["archived"] is False
+    page.get_by_test_id("stop").click()
+    expect(status(page)).to_have_text("Stopped", timeout=RUN_TIMEOUT)
+
+
 # ---------------------------------------------------------------- needs you
 
 

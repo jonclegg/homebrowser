@@ -53,8 +53,11 @@ button, input, textarea { font: inherit; color: inherit; }
 .app.empty { grid-template-columns: 290px minmax(0, 1fr); }
 
 /* sessions */
-.rail { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); }
-.ask { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.rail { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; }
+.ask { flex: none; padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.ask .blank { align-self: flex-start; color: var(--soft); }
+.ask .blank:hover { color: var(--ink); background: var(--raised); }
+.list { flex: 1 0 auto; display: flex; flex-direction: column; }
 .ask label { font-weight: 600; font-size: 13px; }
 .ask form { display: flex; gap: 8px; }
 .ask input { flex: 1; min-width: 0; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--ground); }
@@ -67,6 +70,24 @@ button, input, textarea { font: inherit; color: inherit; }
 .item .thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
 .item .site { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .msg { color: var(--soft); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .msg.none { color: var(--muted); }
+/* A session's row: the entry, and its archive (or restore) button on the right, shown on
+   hover, on focus and on the chosen session; always on touch screens, which have no hover. */
+.row { position: relative; }
+.row .item { padding-right: 40px; }
+.row-action { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; opacity: 0; }
+.row-action:hover { background: var(--line); color: var(--ink); }
+.row:hover .row-action, .row:focus-within .row-action, .row .item[aria-current="true"] + .row-action { opacity: 1; }
+@media (hover: none) { .row-action { opacity: 1; } }
+/* Archived sessions: one line at the bottom of the list, closed until opened. */
+.archive { margin-top: auto; padding-bottom: 8px; border-top: 1px solid var(--line-soft); }
+.archive-toggle { display: flex; align-items: center; gap: 6px; width: 100%; padding: 12px 16px 8px; border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; text-align: left; cursor: pointer; }
+.archive-toggle:hover { color: var(--ink); }
+.archive-toggle svg { transition: transform .15s; }
+.archive-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.archive-toggle .count { margin-left: auto; padding: 0 7px; border-radius: 999px; background: var(--raised); letter-spacing: 0; }
+.archive .item { opacity: .75; }
+.archive .item:hover, .archive .item[aria-current="true"] { opacity: 1; }
 
 .status { font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .status.needs { color: var(--needs-ink); } .status.needs .dot { background: var(--needs); }
@@ -342,8 +363,12 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
         <input id="new-message" type="text" autocomplete="off" placeholder="e.g. check my order status on example.com" data-testid="new-message">
         <button class="btn primary" type="submit" data-testid="new-start">Start</button>
       </form>
+      <button class="btn small quiet blank" type="button" id="new-blank" data-testid="new-blank" title="A new tab with no task: browse it yourself, and message Stealthbox when you want it to work there">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        Blank session
+      </button>
     </div>
-    <div id="groups" data-testid="session-list"></div>
+    <div class="list" id="groups" data-testid="session-list"></div>
   </nav>
 
   <main class="stage" id="detail">
@@ -440,8 +465,11 @@ import RFB from '/viewer/core/rfb.js';
 
 // The entry for the browser itself, beside the sessions: it shows whatever tab is in front.
 const BROWSER = 'browser';
-const STATE_LABEL = { live: 'Live', needs: 'Needs you', working: 'Working', paused: 'Paused · you have the mouse', waiting: 'Waiting its turn', done: 'Finished', stopped: 'Stopped' };
-const GROUPS = [['Needs you', ['needs']], ['In progress', ['working', 'paused', 'waiting']], ['Earlier', ['done', 'stopped']]];
+const STATE_LABEL = { live: 'Live', new: 'New', needs: 'Needs you', working: 'Working', paused: 'Paused · you have the mouse', waiting: 'Waiting its turn', done: 'Finished', stopped: 'Stopped' };
+const GROUPS = [['Needs you', ['needs']], ['In progress', ['working', 'paused', 'waiting', 'new']], ['Earlier', ['done', 'stopped']]];
+const X_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+const RESTORE_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+const CHEVRON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
 const DONE_MESSAGE = 'I’m done, carry on';
 
 let sessions = [];
@@ -449,6 +477,8 @@ let selected = decodeURIComponent(location.hash.slice(1)) || null;
 let status = {};
 let rfb = null;
 let threadSession = null;
+// The archive section starts closed on every load.
+let archiveOpen = false;
 const detailsOpen = new Map();
 const $ = (id) => document.getElementById(id);
 
@@ -475,7 +505,8 @@ function current() { return sessions.find((s) => s.session === selected) || null
 function title(s) { return (liveUrl(s) ? siteOf(liveUrl(s)) : s.site) || 'New session'; }
 function liveUrl(s) { return s.in_front && status.front_tab ? status.front_tab.url : null; }
 // The session that owns the tab in front, if any: then it is the one entry for that tab.
-function frontOwner() { return sessions.find((s) => s.in_front) || null; }
+// An archived one is out of the list, so the Browser entry stands for its tab.
+function frontOwner() { return sessions.find((s) => s.in_front && !s.archived) || null; }
 function siteOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
@@ -537,49 +568,82 @@ function browserItem() {
   return item;
 }
 
+function sessionRow(s) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'item';
+  item.dataset.session = s.session;
+  item.dataset.testid = 'session-item';
+  item.dataset.state = s.state;
+  item.setAttribute('aria-current', String(s.session === selected));
+  const thumb = document.createElement('span');
+  thumb.className = 'thumb';
+  // A session whose tab is in front is what the live preview shows.
+  if (s.in_front) thumb.append(livePreview().cloneNode());
+  else if (s.shot_url) { const img = document.createElement('img'); img.src = s.shot_url; img.alt = ''; thumb.append(img); }
+  const site = document.createElement('span'); site.className = 'site'; site.textContent = title(s);
+  const msg = document.createElement('span'); msg.className = 'msg' + (lastAsk(s) ? '' : ' none'); msg.textContent = lastAsk(s) || 'No messages yet';
+  const st = document.createElement('span'); st.innerHTML = '<span class="dot"></span><span></span>'; setStatus(st, s.state);
+  item.append(thumb, site, msg, st);
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = 'row-action';
+  const label = s.archived ? 'Unarchive' : 'Archive';
+  action.dataset[s.archived ? 'unarchive' : 'archive'] = s.session;
+  action.dataset.testid = s.archived ? 'unarchive-session' : 'archive-session';
+  action.title = label;
+  action.setAttribute('aria-label', `${label} ${title(s)}`);
+  action.innerHTML = s.archived ? RESTORE_ICON : X_ICON;
+  row.append(item, action);
+  return row;
+}
+
 function renderList() {
   const groups = $('groups');
   groups.replaceChildren();
+  const open = sessions.filter((s) => !s.archived);
+  const archived = sessions.filter((s) => s.archived);
+  // Once empty, the archive closes again for the next session that goes there.
+  if (!archived.length) archiveOpen = false;
   if (!frontOwner()) {
     const heading = document.createElement('div');
     heading.className = 'group';
     heading.textContent = 'Browser';
     groups.append(heading, browserItem());
   }
-  if (!sessions.length) {
+  if (!open.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-list';
     empty.textContent = 'No sessions yet.';
     groups.append(empty);
   }
   for (const [name, states] of GROUPS) {
-    const members = sessions.filter((s) => states.includes(s.state));
+    const members = open.filter((s) => states.includes(s.state));
     if (!members.length) continue;
     const heading = document.createElement('div');
     heading.className = 'group';
     heading.textContent = name;
-    groups.append(heading);
-    for (const s of members) {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'item';
-      item.dataset.session = s.session;
-      item.dataset.testid = 'session-item';
-      item.dataset.state = s.state;
-      item.setAttribute('aria-current', String(s.session === selected));
-      const thumb = document.createElement('span');
-      thumb.className = 'thumb';
-      // A session whose tab is in front is what the live preview shows.
-      if (s.in_front) thumb.append(livePreview().cloneNode());
-      else if (s.shot_url) { const img = document.createElement('img'); img.src = s.shot_url; img.alt = ''; thumb.append(img); }
-      const site = document.createElement('span'); site.className = 'site'; site.textContent = title(s);
-      const msg = document.createElement('span'); msg.className = 'msg'; msg.textContent = lastAsk(s);
-      const st = document.createElement('span'); st.innerHTML = '<span class="dot"></span><span></span>'; setStatus(st, s.state);
-      item.append(thumb, site, msg, st);
-      groups.append(item);
-    }
+    groups.append(heading, ...members.map(sessionRow));
   }
-  $('drawer-needs').hidden = !sessions.some((s) => s.state === 'needs' && s.session !== selected);
+  if (archived.length) {
+    const section = document.createElement('div');
+    section.className = 'archive';
+    section.dataset.testid = 'archive';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'archive-toggle';
+    toggle.id = 'archive-toggle';
+    toggle.dataset.testid = 'archive-toggle';
+    toggle.setAttribute('aria-expanded', String(archiveOpen));
+    toggle.innerHTML = `${CHEVRON}<span>Archived</span><span class="count"></span>`;
+    toggle.lastElementChild.textContent = archived.length;
+    section.append(toggle);
+    if (archiveOpen) section.append(...archived.map(sessionRow));
+    groups.append(section);
+  }
+  $('drawer-needs').hidden = !open.some((s) => s.state === 'needs' && s.session !== selected);
 }
 
 // ------------------------------------------------------------- one session
@@ -665,7 +729,9 @@ function renderNow(s, busyElsewhere) {
   const running = s.messages.findLast((m) => m.status === 'running');
   const last = s.messages.findLast((m) => m.from === 'stealthbox');
   let kind = 'done', label = STATE_LABEL[s.state], text = '', reason = '', time = '', since = null;
-  if (s.state === 'needs') {
+  if (s.state === 'new') {
+    text = 'A blank tab. Browse in it yourself, or message Stealthbox to work in it.';
+  } else if (s.state === 'needs') {
     kind = 'needs'; label = 'Waiting for you';
     text = 'Do what the note above the page says, then press Done, carry on.';
   } else if (s.state === 'paused') {
@@ -716,7 +782,14 @@ function renderThread(s) {
   const switched = threadSession !== s.session;
   const follow = switched || nearBottom(thread);
   const before = thread.scrollHeight;
-  thread.replaceChildren(...s.messages.map(messageEl));
+  if (s.messages.length) thread.replaceChildren(...s.messages.map(messageEl));
+  else {
+    const hint = document.createElement('div');
+    hint.className = 'thread-hint';
+    hint.dataset.testid = 'blank-hint';
+    hint.textContent = 'No messages yet. Ask Stealthbox to do something in this tab, or drive it yourself in the browser.';
+    thread.replaceChildren(hint);
+  }
   threadSession = s.session;
   if (follow) toLatest(false);
   else if (thread.scrollHeight > before) $('jump').hidden = false;
@@ -796,7 +869,8 @@ function renderSession() {
   if (s.state === 'working') actions.append(actionButton('Take over', 'pause'), actionButton('Stop', 'cancel', 'quiet'));
   if (s.state === 'paused') actions.append(actionButton('Hand back to Stealthbox', 'resume', 'primary'), actionButton('Stop', 'cancel', 'quiet'));
   if (s.state === 'waiting') actions.append(actionButton('Stop', 'cancel', 'quiet'));
-  if (['done', 'stopped'].includes(s.state)) actions.append(actionButton('Close session', 'close', 'quiet'));
+  if (s.archived) actions.append(actionButton('Unarchive', 'unarchive'));
+  if (['new', 'done', 'stopped'].includes(s.state)) actions.append(actionButton('Close session', 'close', 'quiet'));
 
   const needs = s.state === 'needs';
   $('s-task').hidden = !needs;
@@ -815,7 +889,7 @@ function renderSession() {
   // a dead screen), labelled as another tab. Taking over brings the tab to the front.
   const driving = s.state === 'working';
   const live = s.in_front || !s.shot_url;
-  const interactive = s.in_front && ['needs', 'paused', 'done', 'stopped'].includes(s.state);
+  const interactive = s.in_front && ['new', 'needs', 'paused', 'done', 'stopped'].includes(s.state);
   $('s-browser').classList.toggle('mine', interactive && !needs);
   $('s-browser').classList.toggle('needs', needs);
   $('s-driving').hidden = !interactive || needs || s.state === 'paused';
@@ -842,7 +916,8 @@ function renderSession() {
 
   renderNow(s, busyElsewhere);
   renderThread(s);
-  $('reply').placeholder = needs ? 'e.g. I signed in with Google, carry on' : s.state === 'working' || s.state === 'waiting' ? 'Message Stealthbox about this tab…' : 'e.g. Now sort by price';
+  $('reply').placeholder = needs ? 'e.g. I signed in with Google, carry on' : s.state === 'working' || s.state === 'waiting' ? 'Message Stealthbox about this tab…'
+    : s.state === 'new' ? 'Ask Stealthbox to do something in this tab…' : 'e.g. Now sort by price';
   renderSend(s);
 }
 
@@ -1079,8 +1154,9 @@ function render() {
   // A session that needs the user, then one at work; otherwise the live browser,
   // not a finished session whose screen is long gone.
   if (!selected) {
-    const shown = sessions.find((s) => s.state === 'needs')
-      || sessions.find((s) => ['working', 'paused', 'waiting'].includes(s.state));
+    const open = sessions.filter((s) => !s.archived);
+    const shown = open.find((s) => s.state === 'needs')
+      || open.find((s) => ['working', 'paused', 'waiting'].includes(s.state));
     selected = shown ? shown.session : BROWSER;
   }
   if (selected && location.hash.slice(1) !== selected) history.replaceState(null, '', '#' + selected);
@@ -1128,12 +1204,30 @@ async function act(name, s) {
   const run = s.running_run;
   if (name === 'pause' || name === 'resume' || name === 'cancel') await api('POST', `/v1/runs/${run}/${name}`);
   if (name === 'close') { await api('POST', `/v1/sessions/${s.session}/close`); selected = null; }
+  if (name === 'unarchive') await api('POST', `/v1/sessions/${s.session}/unarchive`);
   if (name === 'focus') await api('POST', `/v1/sessions/${s.session}/focus`);
   if (name === 'carry-on') await api('POST', '/v1/chat', { message: DONE_MESSAGE, session: s.session, wait: false });
   await refresh();
 }
 
+// Archiving the session on screen moves on, as a mail app does, to what needs you or is at work.
+async function setArchived(session, archived) {
+  $('s-error').hidden = true;
+  try {
+    await api('POST', `/v1/sessions/${session}/${archived ? 'archive' : 'unarchive'}`);
+    if (archived && session === selected) selected = null;
+    await refresh();
+  } catch (error) { showError(error); }
+}
+
 $('groups').addEventListener('click', (event) => {
+  if (event.target.closest('#archive-toggle')) { archiveOpen = !archiveOpen; renderList(); return; }
+  const action = event.target.closest('[data-archive], [data-unarchive]');
+  if (action) {
+    action.disabled = true;
+    setArchived(action.dataset.archive || action.dataset.unarchive, Boolean(action.dataset.archive));
+    return;
+  }
   const item = event.target.closest('[data-session]');
   if (!item) return;
   selected = item.dataset.session;
@@ -1219,6 +1313,16 @@ $('new-form').addEventListener('submit', async (event) => {
     setDrawer(false);
     await refresh();
   } catch (error) { selected = null; render(); showError(error); }
+});
+
+$('new-blank').addEventListener('click', async () => {
+  $('s-error').hidden = true;
+  try {
+    const { session } = await api('POST', '/v1/sessions');
+    selected = session;
+    setDrawer(false);
+    await refresh();
+  } catch (error) { showError(error); }
 });
 
 // ------------------------------------------------------------- devices

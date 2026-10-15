@@ -16,6 +16,7 @@
     POST /v1/runs/{run}/pause        hold the run after its current step and bring its tab to the front, so the user can drive
     POST /v1/runs/{run}/resume
     GET  /v1/sessions                every session: status, latest screenshot, the conversation
+    POST /v1/sessions                a blank session: a new tab in front, no task; message it later
     GET  /v1/sessions/{session}
     POST /v1/sessions/{session}/focus  bring its tab to the front, so the live view shows it
     GET  /v1/browser/screenshot      a JPEG of the live browser, for the console's preview;
@@ -24,6 +25,8 @@
     POST /v1/browser/navigate        {"url": "...", "session": null}: load what was typed in the
                                      console's address bar in the session's tab, or the tab in front
     POST /v1/sessions/{session}/close  close its tab and forget it
+    POST /v1/sessions/{session}/archive    hide it from the console's list (tab and conversation stay);
+    POST /v1/sessions/{session}/unarchive  a message to it, or a run that needs the user, brings it back
     POST /v1/share                   an HTTPS link to the console (a Cloudflare quick tunnel)
     POST /v1/unshare                 stop it; the devices signed in through it are signed out
     POST /v1/password-link           {"share": false}: a one-time link to set the console password
@@ -244,22 +247,25 @@ class Session:
         self.conversation = []
         self.runs = []
         self.last_used = time.time()
+        self.archived = False
 
     @property
     def busy(self):
         return any(run.status in ("queued", "running") for run in self.runs)
 
     def state(self):
-        """One word for the console: needs, working, paused, waiting, done or stopped."""
+        """One word for the console: new, needs, working, paused, waiting, done or stopped."""
         running = next((run for run in self.runs if run.status == "running"), None)
         if running:
             return "paused" if running.paused else "working"
         if any(run.status == "queued" for run in self.runs):
             return "waiting"
-        last = self.runs[-1] if self.runs else None
-        if last and last.status in ("needs_user", "needs_input"):
+        if not self.runs:
+            return "new"
+        last = self.runs[-1]
+        if last.status in ("needs_user", "needs_input"):
             return "needs"
-        if last and last.status == "cancelled":
+        if last.status == "cancelled":
             return "stopped"
         return "done"
 
@@ -294,6 +300,7 @@ class Session:
             "tab": self.target_id,
             "shot_url": shot,
             "in_front": bool(front_tab and self.target_id == front_tab["id"]),
+            "archived": self.archived,
             "task": last.reply if state == "needs" else None,
             "needs_user": last.needs_user if state == "needs" else None,
             "running_run": next((run.id for run in self.runs if run.status in ("running", "queued")), None),
@@ -406,6 +413,8 @@ class Stealthbox:
                 session = self.sessions.get(session_id)
                 if session is None:
                     raise LookupError(f"no session {session_id} (it may have expired)")
+                if session.archived:
+                    self._archive(session, False)
             else:
                 session = Session(tab)
                 self.sessions[session.id] = session
@@ -497,6 +506,36 @@ class Stealthbox:
                 session.page.bring_to_front()
                 self.events.publish("session.focused", session=session.id)
         self.queue.put(chore)
+
+    def open_blank(self):
+        """A session with no task yet: a new tab, brought to the front once the run in
+        progress (if any) is done with the mouse, for the user to browse or message later."""
+        session = Session()
+        with self.lock:
+            self.sessions[session.id] = session
+        self.events.publish("session.created", session=session.id)
+
+        def chore(context):
+            if session.id not in self.sessions:
+                # Closed before the worker got to it.
+                return
+            session.page = context.new_page()
+            session.page.bring_to_front()
+            session.target_id = agent.humanize.target_id(session.page)
+            self.events.publish("session.tab_opened", session=session.id, tab=session.target_id)
+        self.queue.put(chore)
+        return session
+
+    def archive(self, session, archived):
+        with self.lock:
+            self._archive(session, archived)
+
+    def _archive(self, session, archived):
+        """Under self.lock. Hidden from the console's list; the tab and conversation stay."""
+        if session.archived == archived:
+            return
+        session.archived = archived
+        self.events.publish("session.archived" if archived else "session.unarchived", session=session.id)
 
     def close(self, session):
         if session.busy:
@@ -647,6 +686,9 @@ class Stealthbox:
             finally:
                 run.finished = now()
                 run.session.last_used = time.time()
+                if run.status in ("needs_user", "needs_input"):
+                    # Never hide a question for the user in the archive.
+                    self.archive(run.session, False)
                 run.persist()
                 self.current = None
                 view = run.view()
@@ -1323,13 +1365,18 @@ def make_handler(stealthbox, token):
                 except RuntimeError as exc:
                     return self._send(409, {"error": str(exc)})
                 return self._send(200, {"url": url})
-            if len(parts) == 4 and parts[:2] == ["v1", "sessions"] and parts[3] in ("focus", "close"):
+            if parts == ["v1", "sessions"]:
+                return self._send(201, {"session": stealthbox.open_blank().id})
+            if len(parts) == 4 and parts[:2] == ["v1", "sessions"] and parts[3] in ("focus", "close", "archive",
+                                                                                   "unarchive"):
                 try:
                     session = stealthbox.session(parts[2])
                     if parts[3] == "focus":
                         stealthbox.focus(session)
-                    else:
+                    elif parts[3] == "close":
                         stealthbox.close(session)
+                    else:
+                        stealthbox.archive(session, parts[3] == "archive")
                 except LookupError as exc:
                     return self._send(404, {"error": str(exc)})
                 except RuntimeError as exc:
