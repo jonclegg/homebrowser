@@ -432,8 +432,8 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
         </div>
         <div class="now" id="s-now" data-testid="now" aria-live="polite">
           <span class="dot"></span>
-          <span class="label" id="now-label"></span>
-          <span class="text" id="now-text"></span>
+          <span class="label" id="now-label" data-testid="now-label"></span>
+          <span class="text" id="now-text" data-testid="now-text"></span>
           <span class="time elapsed" id="now-time"></span>
         </div>
       </section>
@@ -738,7 +738,11 @@ function renderNow(s, busyElsewhere) {
   const running = s.messages.findLast((m) => m.status === 'running');
   const last = s.messages.findLast((m) => m.from === 'stealthbox');
   let kind = 'done', label = STATE_LABEL[s.state], text = '', reason = '', time = '', since = null;
-  if (s.state === 'new') {
+  if (s.state === 'new' && !s.in_front && busyElsewhere) {
+    // One screen and one mouse: the tab is open, behind the run that has them.
+    kind = 'waiting'; label = 'Opening';
+    text = `Stealthbox is working on ${title(busyElsewhere)}, so this tab waits behind it and comes to the front when that run is done. To use it now, take over or stop that run.`;
+  } else if (s.state === 'new') {
     text = 'A blank tab. Browse in it yourself, or message Stealthbox to work in it.';
   } else if (s.state === 'needs') {
     kind = 'needs'; label = 'Waiting for you';
@@ -878,6 +882,7 @@ function renderSession() {
   if (s.state === 'working') actions.append(actionButton('Take over', 'pause'), actionButton('Stop', 'cancel', 'quiet'));
   if (s.state === 'paused') actions.append(actionButton('Hand back to Stealthbox', 'resume', 'primary'), actionButton('Stop', 'cancel', 'quiet'));
   if (s.state === 'waiting') actions.append(actionButton('Stop', 'cancel', 'quiet'));
+  if (s.state === 'new' && !s.in_front && busyElsewhere) actions.append(actionButton(`Go to ${title(busyElsewhere)}`, 'go-to-busy'));
   if (s.archived) actions.append(actionButton('Unarchive', 'unarchive'));
   if (['new', 'done', 'stopped'].includes(s.state)) actions.append(actionButton('Close session', 'close', 'quiet'));
 
@@ -1219,6 +1224,11 @@ async function listen() {
 
 async function act(name, s) {
   $('s-error').hidden = true;
+  if (name === 'go-to-busy') {
+    selected = sessions.find((other) => other.session !== s.session && ['working', 'paused'].includes(other.state)).session;
+    render();
+    return;
+  }
   const run = s.running_run;
   if (name === 'pause' || name === 'resume' || name === 'cancel') await api('POST', `/v1/runs/${run}/${name}`);
   if (name === 'close') { await api('POST', `/v1/sessions/${s.session}/close`); selected = null; }
@@ -1335,12 +1345,13 @@ $('new-form').addEventListener('submit', async (event) => {
 
 $('new-blank').addEventListener('click', async () => {
   $('s-error').hidden = true;
+  $('new-blank').disabled = true;
   try {
     const { session } = await api('POST', '/v1/sessions');
     selected = session;
     setDrawer(false);
     await refresh();
-  } catch (error) { showError(error); }
+  } catch (error) { showError(error); } finally { $('new-blank').disabled = false; }
 });
 
 // ------------------------------------------------------------- devices

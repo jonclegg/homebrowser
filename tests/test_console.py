@@ -466,6 +466,39 @@ def test_a_request_that_fails_on_the_server_says_what_failed(page):
         assert response.status == 400 and error in response.json()["error"], f"{path} {body}: {response.text()}"
 
 
+def test_a_blank_session_opened_while_a_run_works_says_it_waits_and_comes_to_the_front_after(page):
+    """One screen, one mouse: the new tab opens at once behind the run's, and the console
+    says so, instead of a session with no tab and nothing happening."""
+    working = start_session(page, "Go to wikipedia.org, search for Austin, Texas, open the article, then open "
+                                  "the article of each of the ten largest cities in Texas one by one, and tell "
+                                  "me the population in each infobox and the name of each mayor.")
+    expect(status(page)).to_have_text("Working", timeout=RUN_TIMEOUT)
+    page.wait_for_function("() => document.querySelectorAll('[data-testid=steps] li').length >= 1",
+                           timeout=RUN_TIMEOUT)
+    front = api_get(page, "/v1/status")["front_tab"]["id"]
+
+    page.get_by_test_id("new-blank").click()
+    page.wait_for_function("working => location.hash.startsWith('#s_') && location.hash.slice(1) !== working",
+                           arg=working, timeout=10000)
+    blank = page.evaluate("location.hash.slice(1)")
+    view = api_get(page, f"/v1/sessions/{blank}")
+    assert view["tab"] and not view["in_front"], view
+    assert api_get(page, "/v1/status")["front_tab"]["id"] == front, "the run's tab lost the front"
+    expect(page.get_by_test_id("now-label")).to_have_text("Opening")
+    expect(page.get_by_test_id("now-text")).to_contain_text("comes to the front when that run is done")
+
+    page.get_by_test_id("go-to-busy").click()
+    expect(page).to_have_url(re.compile(f"#{working}$"))
+    page.get_by_test_id("cancel").click()
+    expect(status(page)).to_have_text("Stopped", timeout=RUN_TIMEOUT)
+
+    # The worker is free: the blank tab comes to the front, ready to browse.
+    list_item(page, blank).click()
+    expect(status(page)).to_have_text("New")
+    expect(page.get_by_test_id("live-view")).to_have_attribute("data-view-only", "false", timeout=30000)
+    assert api_get(page, "/v1/status")["front_tab"]["id"] == view["tab"]
+
+
 def test_the_x_archives_a_session_into_a_closed_archive_at_the_bottom_and_restore_brings_it_back(page):
     first = open_blank_session(page)
     second = open_blank_session(page)
