@@ -479,6 +479,12 @@ const DONE_MESSAGE = 'I’m done, carry on';
 
 let sessions = [];
 let selected = decodeURIComponent(location.hash.slice(1)) || null;
+// When the session list was asked for, and when a link or an action chose a session.
+// A list asked for before the choice may not have that session yet (a refresh already
+// in flight when a session starts), so it does not undo the choice.
+let listedAt = 0;
+let chosenAt = Date.now();
+function choose(session) { selected = session; chosenAt = Date.now(); }
 let status = {};
 let rfb = null;
 // The browser the live view is connected to: its viewer and preview paths.
@@ -1281,7 +1287,7 @@ function connectLive(viewOnly, view) {
 }
 
 function render() {
-  if (selected && selected !== BROWSER && !current()) selected = null;
+  if (selected && selected !== BROWSER && !current() && listedAt >= chosenAt) selected = null;
   // One entry per tab: when a session owns the tab in front, the Browser view is that session.
   if (selected === BROWSER && frontOwner()) selected = frontOwner().session;
   // A session that needs the user, then one at work; otherwise the live browser,
@@ -1299,9 +1305,11 @@ function render() {
 
 // ------------------------------------------------------------- data
 async function refresh() {
+  const asked = Date.now();
   try {
     [status, { sessions }] = await Promise.all([api('GET', '/v1/status'), api('GET', '/v1/sessions')]);
   } catch (error) { showError(error, 'refresh'); return; }
+  listedAt = asked;
   clearError('refresh');
   $('browser-dot').style.background = status.browser_connected ? 'var(--ok)' : 'var(--wait)';
   $('browser-text').textContent = status.browser_connected ? 'Browser ready' : 'Browser not connected yet';
@@ -1424,7 +1432,7 @@ $('s-compose').addEventListener('submit', async (event) => {
       const run = await api('POST', '/v1/chat', owner ? { message: text, session: owner.session, wait: false }
         : { message: text, tab: tab.id, wait: false });
       $('reply').value = '';
-      selected = run.session;
+      choose(run.session);
       threadSession = null;
       await refresh();
     } catch (error) { showError(error); }
@@ -1460,7 +1468,7 @@ $('new-form').addEventListener('submit', async (event) => {
   try {
     const run = await api('POST', '/v1/chat', { message: text, wait: false });
     $('new-message').value = '';
-    selected = run.session;
+    choose(run.session);
     setDrawer(false);
     await refresh();
   } catch (error) { selected = null; render(); showError(error); }
@@ -1471,7 +1479,7 @@ $('new-blank').addEventListener('click', async () => {
   $('new-blank').disabled = true;
   try {
     const { session } = await api('POST', '/v1/sessions');
-    selected = session;
+    choose(session);
     setDrawer(false);
     await refresh();
   } catch (error) { showError(error); } finally { $('new-blank').disabled = false; }
@@ -1565,7 +1573,7 @@ if (saved) history.replaceState(null, '', location.pathname + location.hash);
 $('notice-close').addEventListener('click', () => { $('notice').hidden = true; });
 
 // Fetch first: a link to a session that started since the last refresh (a hand-off) is not in the list yet.
-window.addEventListener('hashchange', () => { selected = decodeURIComponent(location.hash.slice(1)) || null; refresh(); });
+window.addEventListener('hashchange', () => { choose(decodeURIComponent(location.hash.slice(1)) || null); refresh(); });
 listen();
 refresh();
 // Which tab is in front changes with no event (another program switching tabs or

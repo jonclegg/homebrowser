@@ -300,8 +300,9 @@ def test_new_session_runs_to_a_reply_with_steps_and_a_live_view(page):
     # Progress inside the first step: what it is doing, for how long, and the live tab.
     now = page.get_by_test_id("now")
     expect(now).to_be_visible(timeout=RUN_TIMEOUT)
+    # Queued while the session's own browser opens, then a phase.
     expect(stealthbox_messages(page).last).to_have_attribute(
-        "data-phase", re.compile("starting|looking|thinking|acting"))
+        "data-phase", re.compile("starting|looking|thinking|acting"), timeout=60000)
     expect(now.locator(".elapsed")).to_have_text(re.compile(r"^\d+s$"), timeout=5000)
     expect(page.get_by_test_id("live-view")).to_be_visible()
     expect(page.get_by_test_id("live-view")).to_have_attribute("data-connected", "true", timeout=30000)
