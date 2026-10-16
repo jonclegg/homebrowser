@@ -524,7 +524,7 @@ function clearError(source) {
 function current() { return sessions.find((s) => s.session === selected) || null; }
 // The live tab's site for a session whose tab is in front (the user may have
 // navigated it since the run), else the site its run was on.
-function title(s) { return (liveUrl(s) ? siteOf(liveUrl(s)) : s.site) || 'New session'; }
+function title(s) { return siteOf(liveUrl(s) || '') || s.site || 'New session'; }
 function liveUrl(s) { return s.live_url; }
 function inMain(s) { return s.browser?.kind === 'main'; }
 // The session that owns the main browser's tab in front, if any: then it is the one

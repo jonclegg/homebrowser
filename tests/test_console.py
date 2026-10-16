@@ -767,6 +767,11 @@ def test_the_browser_entry_x_on_an_archived_sessions_tab_closes_the_tab_and_the_
                             data={"message": "Tell me this page's title.", "tab": tab, "wait": False}).json()
     page.request.post(f"{base}/v1/runs/{run['run']}/cancel", headers={"Origin": base})
     session = run["session"]
+    # A run stops after its current step; its tab cannot close while it works.
+    deadline = time.time() + RUN_SECONDS
+    while api_get(page, f"/v1/sessions/{session}")["running_run"]:
+        assert time.time() < deadline, "the run never stopped"
+        time.sleep(1)
     list_item(page, session).wait_for()
     archive_from_the_list(page, session)
     entry = page.get_by_test_id("browser-item")
