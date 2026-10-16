@@ -981,12 +981,12 @@ class TestSessionBrowsers:
         request = SimpleNamespace(app={"pool": self._pool(tmp_path)}, match_info={"key": key})
         assert asyncio.run(_mod.handle_session_close(request)).status == 400
 
-    def test_a_new_session_takes_the_lowest_free_display(self, tmp_path):
+    def test_sessions_opening_at_once_take_different_displays(self, tmp_path):
         pool = self._pool(tmp_path)
-        pool._processes["s_a"] = self._process(5101, _mod.Display(100, []))
-        pool._processes["s_b"] = self._process(5102, _mod.Display(102, []))
-        pool._processes["12345"] = self._process(5103)
-        assert pool._free_display() == 101
+        assert [pool._take_display() for _ in range(3)] == [100, 101, 102]
+        pool._displays.discard(101)
+        assert pool._take_display() == 101
+        assert pool._take_display() == 103
 
     def test_a_display_has_its_own_vnc_port(self):
         assert _mod.Display(99, []).vnc_port == 5900

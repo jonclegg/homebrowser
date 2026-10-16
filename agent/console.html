@@ -528,8 +528,12 @@ function frontOwner() { return sessions.find((s) => inMain(s) && s.in_front && !
 function busyInMain(s) {
   return inMain(s) ? sessions.find((other) => other.session !== s.session && inMain(other) && ['working', 'paused'].includes(other.state)) || null : null;
 }
+// A web page's site; none for a browser page (a session's browser opens on chrome://newtab).
 function siteOf(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+  try {
+    const parsed = new URL(url);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.hostname.replace(/^www\./, '') : '';
+  } catch { return ''; }
 }
 function lastAsk(s) { return [...s.messages].reverse().find((m) => m.from === 'you')?.text || ''; }
 function setStatus(el, state) {

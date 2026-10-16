@@ -401,6 +401,9 @@ class ChromePool:
         # Connection refcounting for status reporting
         self._connections: dict[str, int] = {}
         self._idle_tasks: dict[str, asyncio.Task] = {}
+        # Display numbers of session browsers, taken from the moment one is chosen: two
+        # sessions opening at once both chose :100 while neither had started yet.
+        self._displays: set[int] = set()
 
     @property
     def default_key(self) -> str:
@@ -592,14 +595,21 @@ class ChromePool:
             await asyncio.to_thread(self._safe_rmtree, user_data_dir)
             await asyncio.to_thread(shutil.copytree, default.user_data_dir, user_data_dir,
                                     symlinks=True, ignore=PROFILE_COPY_SKIPS)
-            display = await asyncio.to_thread(start_display, self._free_display(),
-                                              os.environ.get("STEALTHBOX_DISPLAY_SIZE", "1920x1080"))
+            number = self._take_display()
+            try:
+                display = await asyncio.to_thread(start_display, number,
+                                                  os.environ.get("STEALTHBOX_DISPLAY_SIZE", "1920x1080"))
+            except BaseException:
+                self._displays.discard(number)
+                await asyncio.to_thread(self._safe_rmtree, user_data_dir)
+                raise
             try:
                 # Launched as the default identity was, so both present the same machine.
                 cp = await self._launch(key, default.seed, user_data_dir, display, None, self._default_timezone,
                                         self._default_locale, None, self._default_geoip)
             except BaseException:
                 await asyncio.to_thread(stop_display, display)
+                self._displays.discard(number)
                 await asyncio.to_thread(self._safe_rmtree, user_data_dir)
                 raise
             os.makedirs(VIEWER_TOKENS_DIR, exist_ok=True)
@@ -607,10 +617,11 @@ class ChromePool:
                 fh.write(f"{key}: localhost:{display.vnc_port}\n")
             return cp
 
-    def _free_display(self) -> int:
-        """The lowest display number above :99 that no session browser has."""
-        taken = {proc.display.number for proc in self._processes.values() if proc.display}
-        return next(number for number in itertools.count(MAIN_DISPLAY + 1) if number not in taken)
+    def _take_display(self) -> int:
+        """Take the lowest display number above :99 that no session browser has."""
+        number = next(number for number in itertools.count(MAIN_DISPLAY + 1) if number not in self._displays)
+        self._displays.add(number)
+        return number
 
     async def process_for_target(self, target: str) -> ChromeProcess:
         """The running browser that has this page target (tab) open."""
@@ -809,6 +820,7 @@ class ChromePool:
             with contextlib.suppress(FileNotFoundError):
                 os.remove(viewer_token_path(key))
             await asyncio.to_thread(stop_display, proc.display)
+            self._displays.discard(proc.display.number)
         if self._default is proc:
             self._default = None
         self._locks.pop(key, None)
