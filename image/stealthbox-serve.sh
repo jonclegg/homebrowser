@@ -3,6 +3,8 @@
 set -euo pipefail
 
 DATA_DIR=/tmp/cdp-server
+export STEALTHBOX_VIEWER_TOKENS=/tmp/viewer-tokens
+VIEWER_TOKENS=$STEALTHBOX_VIEWER_TOKENS
 PROFILE_DIR=/profile/default
 PROFILE_KEY="${STEALTHBOX_FINGERPRINT_SEED:-__default__}"
 
@@ -30,6 +32,14 @@ ln -sfn "$PROFILE_DIR" "$DATA_DIR/$PROFILE_KEY"
 
 x11vnc -display :99 -forever -shared -nopw -localhost -rfbport 5900 -quiet -bg -o /tmp/x11vnc.log
 websockify --web /usr/share/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
+
+# Session browsers (one per session, each on its own display, from a copy of the
+# profile) do not outlive cdp-server: clear what a previous run left. Their live
+# views go through one websockify that finds each display by the token file
+# cdp-server writes for it.
+rm -rf "$DATA_DIR"/s_* "$VIEWER_TOKENS"
+mkdir -p "$VIEWER_TOKENS"
+websockify --token-plugin TokenFile --token-source "$VIEWER_TOKENS" 6081 >/tmp/websockify-sessions.log 2>&1 &
 
 # The chat API. It connects to the browser over loopback on first use, so it can
 # start before Chrome is up. If it dies, it starts again: once it aborted in native

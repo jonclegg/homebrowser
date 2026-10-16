@@ -464,9 +464,12 @@ dialog .row p { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
 <script type="module">
 import RFB from '/viewer/core/rfb.js';
 
-// The entry for the browser itself, beside the sessions: it shows whatever tab is in front.
+// The entry for the main browser, beside the sessions: it shows whatever tab is in front
+// there. Each session started here has a browser of its own; the main browser is the
+// one programs share over CDP, and a session in one of its tabs works there.
 const BROWSER = 'browser';
-const STATE_LABEL = { live: 'Live', new: 'New', needs: 'Needs you', working: 'Working', paused: 'Paused · you have the mouse', waiting: 'Waiting its turn', done: 'Finished', stopped: 'Stopped' };
+const MAIN_VIEW = { viewer: '/viewer/websockify', preview: '/v1/browser/screenshot' };
+const STATE_LABEL = { live: 'Live', new: 'New', needs: 'Needs you', working: 'Working', paused: 'Paused · you have the mouse', waiting: 'Waiting', done: 'Finished', stopped: 'Stopped' };
 // Open tabs: tabs you can message that have no run yet, a blank session's or the tab in front that no session owns.
 const GROUPS = [['Needs you', ['needs']], ['Working', ['working', 'paused', 'waiting']], ['Open tabs', ['new']], ['Earlier', ['done', 'stopped']]];
 const X_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
@@ -478,6 +481,8 @@ let sessions = [];
 let selected = decodeURIComponent(location.hash.slice(1)) || null;
 let status = {};
 let rfb = null;
+// The browser the live view is connected to: its viewer and preview paths.
+let rfbView = null;
 let threadSession = null;
 // The archive section starts closed on every load.
 let archiveOpen = false;
@@ -514,10 +519,15 @@ function current() { return sessions.find((s) => s.session === selected) || null
 // The live tab's site for a session whose tab is in front (the user may have
 // navigated it since the run), else the site its run was on.
 function title(s) { return (liveUrl(s) ? siteOf(liveUrl(s)) : s.site) || 'New session'; }
-function liveUrl(s) { return s.in_front && status.front_tab ? status.front_tab.url : null; }
-// The session that owns the tab in front, if any: then it is the one entry for that tab.
-// An archived one is out of the list, so the Browser entry stands for its tab.
-function frontOwner() { return sessions.find((s) => s.in_front && !s.archived) || null; }
+function liveUrl(s) { return s.live_url; }
+function inMain(s) { return s.browser?.kind === 'main'; }
+// The session that owns the main browser's tab in front, if any: then it is the one
+// entry for that tab. An archived one is out of the list, so the Browser entry stands for its tab.
+function frontOwner() { return sessions.find((s) => inMain(s) && s.in_front && !s.archived) || null; }
+// Another session at work in the main browser, which a session there waits behind.
+function busyInMain(s) {
+  return inMain(s) ? sessions.find((other) => other.session !== s.session && inMain(other) && ['working', 'paused'].includes(other.state)) || null : null;
+}
 function siteOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
@@ -546,21 +556,28 @@ function keptDetails(className, key, fallback) {
 function setDrawer(open) { document.body.classList.toggle('drawer', open); showSidebarButton(); }
 
 // ------------------------------------------------------------- the list
-// The live preview: a small picture of the browser's screen, fetched again on every
-// refresh. One image element, reused, so the old picture stays until the new one loads.
-const preview = new Image();
-preview.alt = '';
-preview.dataset.testid = 'preview';
-let previewAt = 0;
-function livePreview() {
-  if (Date.now() - previewAt > 2500) {
-    previewAt = Date.now();
-    const next = new Image();
-    next.onload = () => { preview.src = next.src; };
-    next.src = `/v1/browser/screenshot?t=${previewAt}`;
+// Live previews: a small picture of a browser's screen (the main one's, or a session's
+// own), fetched again on every refresh. One image element per browser, reused, so the
+// old picture stays until the new one loads.
+const previews = new Map();  // preview URL -> { image, at }
+function livePreview(url = MAIN_VIEW.preview) {
+  if (!previews.has(url)) {
+    const image = new Image();
+    image.alt = '';
+    if (url === MAIN_VIEW.preview) image.dataset.testid = 'preview';
+    previews.set(url, { image, at: 0 });
   }
-  return preview;
+  const entry = previews.get(url);
+  if (Date.now() - entry.at > 2500) {
+    entry.at = Date.now();
+    const next = new Image();
+    next.onload = () => { entry.image.src = next.src; };
+    next.src = `${url}${url.includes('?') ? '&' : '?'}t=${entry.at}`;
+  }
+  return entry.image;
 }
+// What a session's live view shows: its own browser, or the main browser while its tab is in front there.
+function shownLive(s) { return Boolean(s.browser?.open) && (!inMain(s) || s.in_front); }
 
 // The list keeps its elements from one render to the next and changes only what
 // changed. Rebuilt on every refresh, the row under a still mouse lost its hover, and
@@ -635,6 +652,7 @@ function fillRow(el, { key, testid, state, shot, site, msg, quiet, action, icon,
   item.setAttribute('aria-current', String(key === selected));
   if (key === BROWSER) {
     // The live preview itself, which loads the next screenshot on its own.
+    const preview = livePreview();
     if (thumb.firstElementChild !== preview) thumb.replaceChildren(preview);
   } else {
     const img = thumb.firstElementChild;
@@ -656,7 +674,6 @@ function fillRow(el, { key, testid, state, shot, site, msg, quiet, action, icon,
 function browserRow() {
   const tab = status.front_tab;
   const el = row(BROWSER);
-  livePreview();
   fillRow(el, {
     key: BROWSER, testid: 'browser-item', state: 'live',
     site: tab ? siteOf(tab.url) || tab.url : 'Browser',
@@ -670,8 +687,8 @@ function browserRow() {
 
 function sessionRow(s) {
   const el = row(s.session);
-  // A session whose tab is in front is what the live preview shows.
-  const shot = s.in_front ? livePreview().getAttribute('src') : s.shot_url;
+  // A session its browser shows has a live preview; otherwise its last screenshot.
+  const shot = (shownLive(s) && livePreview(s.browser.preview).getAttribute('src')) || s.shot_url;
   fillRow(el, {
     key: s.session, testid: 'session-item', state: s.state, shot,
     site: title(s), msg: lastAsk(s) || 'Blank tab · no messages', quiet: !lastAsk(s),
@@ -685,6 +702,9 @@ function sessionRow(s) {
 function renderList() {
   const open = sessions.filter((s) => !s.archived);
   const archived = sessions.filter((s) => s.archived);
+  // Previews of browsers that closed are not fetched again.
+  const browsing = new Set([MAIN_VIEW.preview, ...sessions.map((s) => s.browser?.preview)]);
+  for (const url of previews.keys()) if (!browsing.has(url)) previews.delete(url);
   // Once empty, the archive closes again for the next session that goes there.
   if (!archived.length) archiveOpen = false;
   for (const key of rows.keys()) if (key !== BROWSER && !sessions.some((s) => s.session === key)) rows.delete(key);
@@ -720,7 +740,7 @@ function actionButton(label, act, cls = '') {
 }
 
 // A reply reads in the order it happened: the steps, then what Stealthbox said.
-function messageEl(m) {
+function messageEl(m, s) {
   const el = document.createElement('div');
   const asking = m.from === 'stealthbox' && ['needs_user', 'needs_input'].includes(m.status);
   el.className = 'm' + (m.from === 'you' ? ' you' : asking ? ' needs' : '');
@@ -766,8 +786,7 @@ function messageEl(m) {
     const working = document.createElement('span');
     working.className = 'working' + (m.status === 'queued' ? ' queued' : '');
     working.innerHTML = '<span class="dot"></span><span></span>';
-    working.lastElementChild.textContent = m.status === 'queued'
-      ? 'Waiting for the browser. Stealthbox works on one session at a time.'
+    working.lastElementChild.textContent = m.status === 'queued' ? waitingText(s)
       : m.paused ? 'Holding while you drive.' : `${phaseOf(m).text}…`;
     if (running && !m.paused && phaseOf(m).reason) working.append(why(phaseOf(m).reason));
     el.append(working);
@@ -786,17 +805,36 @@ function messageEl(m) {
   return el;
 }
 
+// A session whose own browser is not open: opening, or its Chrome quit (its last tab closed).
+function browserGone(s) {
+  return s.browser.opening ? 'Opening a browser for this session.'
+    : 'Its browser closed with its last tab. Message it, and it opens again.';
+}
+
+// Why a message has not started: the run before it, a browser to free up or open,
+// or (in the main browser) another session's run.
+function waitingText(s) {
+  if (s.messages.some((m) => m.status === 'running')) return 'Starts when the run before it is done.';
+  if (s.waiting_for_browser) {
+    const limit = status.session_browsers?.limit;
+    return `Waiting for a browser: ${limit} sessions have one, the most at once. It starts when one of them is done.`;
+  }
+  if (s.browser && !s.browser.open) return browserGone(s);
+  const busy = busyInMain(s);
+  return busy ? `The browser is working on ${title(busy)} first.` : 'Starting soon.';
+}
+
 // The line under the screen: the newest thing that happened in it.
-function renderNow(s, busyElsewhere) {
+function renderNow(s) {
   const running = s.messages.findLast((m) => m.status === 'running');
   const last = s.messages.findLast((m) => m.from === 'stealthbox');
   let kind = 'done', label = STATE_LABEL[s.state], text = '', reason = '', time = '', since = null;
-  if (s.state === 'new' && !s.in_front && busyElsewhere) {
-    // One screen and one mouse: the tab is open, behind the run that has them.
-    kind = 'waiting'; label = 'Opening';
-    text = busyElsewhere.state === 'paused'
-      ? `You have the mouse in ${title(busyElsewhere)}, so this tab waits behind it and comes to the front when you hand back or stop that run.`
-      : `Stealthbox is working on ${title(busyElsewhere)}, so this tab waits behind it and comes to the front when that run is done. To use it now, take over or stop that run.`;
+  if (s.state === 'new' && s.waiting_for_browser) {
+    kind = 'waiting'; label = 'Waiting';
+    text = waitingText(s);
+  } else if (s.state === 'new' && s.browser && !s.browser.open) {
+    kind = 'waiting'; label = s.browser.opening ? 'Opening' : 'Closed';
+    text = browserGone(s);
   } else if (s.state === 'new') {
     text = 'A blank tab. Browse in it yourself, or message Stealthbox to work in it.';
   } else if (s.state === 'needs') {
@@ -807,7 +845,7 @@ function renderNow(s, busyElsewhere) {
     text = 'You have the mouse. Hand back to Stealthbox when you are done.';
   } else if (s.state === 'waiting') {
     kind = 'waiting';
-    text = busyElsewhere ? `The browser is working on ${title(busyElsewhere)} first.` : 'Starting soon.';
+    text = waitingText(s);
   } else if (running) {
     kind = 'working';
     const phase = phaseOf(running);
@@ -850,7 +888,7 @@ function renderThread(s) {
   const switched = threadSession !== s.session;
   const follow = switched || nearBottom(thread);
   const before = thread.scrollHeight;
-  if (s.messages.length) thread.replaceChildren(...s.messages.map(messageEl));
+  if (s.messages.length) thread.replaceChildren(...s.messages.map((m) => messageEl(m, s)));
   else {
     const hint = document.createElement('div');
     hint.className = 'thread-hint';
@@ -867,7 +905,7 @@ function renderThread(s) {
 // program over CDP (a scraper's tab never shows up as a session).
 function renderBrowser() {
   const tab = status.front_tab;
-  const busy = sessions.find((s) => ['working', 'paused'].includes(s.state));
+  const busy = sessions.find((s) => inMain(s) && ['working', 'paused'].includes(s.state));
   $('app').classList.remove('empty');
   $('welcome').hidden = true;
   $('session').hidden = false;
@@ -890,14 +928,14 @@ function renderBrowser() {
   $('s-tag').className = 'tag live';
   $('s-tag').lastElementChild.textContent = 'Live';
   // Yours to click and type in, unless a run is driving the tab in front.
-  const driven = sessions.some((other) => other.state === 'working' && other.in_front);
+  const driven = sessions.some((other) => inMain(other) && other.state === 'working' && other.in_front);
   showUrl(tab?.url || '', Boolean(tab) && !driven);
   showLive(true);
   $('s-driving').hidden = driven;
-  connectLive(driven);
+  connectLive(driven, MAIN_VIEW);
   $('s-now').className = 'now ' + (busy ? 'working' : 'done');
   $('now-label').textContent = busy ? 'Stealthbox is working' : 'In front';
-  $('now-text').replaceChildren(busy ? `on ${title(busy)}.` : 'Whatever the browser shows, including programs that drive it over CDP.');
+  $('now-text').replaceChildren(busy ? `on ${title(busy)}.` : 'The main browser: programs that drive it over CDP work here. Sessions started in the console have browsers of their own.');
   const clock = $('now-time');
   delete clock.dataset.since;
   clock.textContent = '';
@@ -914,7 +952,7 @@ function renderBrowserSend() {
   button.dataset.testid = 'send';
   button.setAttribute('aria-label', 'Send');
   button.title = '';
-  const owner = sessions.find((s) => status.front_tab && s.tab === status.front_tab.id);
+  const owner = sessions.find((s) => inMain(s) && status.front_tab && s.tab === status.front_tab.id);
   $('s-compose-hint').textContent = owner ? `Continues the session on ${title(owner)}.` : 'Starts a session in this tab.';
 }
 
@@ -926,7 +964,7 @@ function renderSession() {
   $('session').hidden = !s;
   $('convo').hidden = !s;
   if (!s) { threadSession = null; return; }
-  const busyElsewhere = sessions.find((other) => other.session !== s.session && ['working', 'paused'].includes(other.state));
+  const busyElsewhere = busyInMain(s);
   $('s-title').textContent = title(s);
   setStatus($('s-status'), s.state);
   $('s-asked').textContent = lastAsk(s) ? `“${lastAsk(s)}”` : '';
@@ -937,7 +975,6 @@ function renderSession() {
   if (s.state === 'working') actions.append(actionButton('Take over', 'pause'), actionButton('Stop', 'cancel', 'quiet'));
   if (s.state === 'paused') actions.append(actionButton('Hand back to Stealthbox', 'resume', 'primary'), actionButton('Stop', 'cancel', 'quiet'));
   if (s.state === 'waiting') actions.append(actionButton('Stop', 'cancel', 'quiet'));
-  if (s.state === 'new' && !s.in_front && busyElsewhere) actions.append(actionButton(`Go to ${title(busyElsewhere)}`, 'go-to-busy'));
   if (s.archived) actions.append(actionButton('Unarchive', 'unarchive'));
   if (['new', 'done', 'stopped'].includes(s.state)) actions.append(actionButton('Close session', 'close', 'quiet'));
 
@@ -952,20 +989,22 @@ function renderSession() {
   }
   $('s-paused').hidden = s.state !== 'paused';
 
-  // The live view shows whatever tab is in front, which is this session's only when
-  // its tab is in front: another program sharing the browser (the FSD finder) brings
-  // its own tabs there, even while a run works. Otherwise show the session's last
-  // screenshot, or the live view while there is none yet (a blank panel looks like
-  // a dead screen), labelled as another tab. Taking over brings the tab to the front.
+  // A session's own browser is live in the view while it is open. A session in the
+  // main browser is live only while its tab is in front there: another program sharing
+  // that browser brings its own tabs to the front, even while a run works. Otherwise
+  // show the session's last screenshot, or the main browser live while there is none
+  // yet (a blank panel looks like a dead screen), labelled as another tab. Taking over
+  // brings the tab to the front.
   const driving = s.state === 'working';
-  const live = s.in_front || !s.shot_url;
-  const interactive = s.in_front && ['new', 'needs', 'paused', 'done', 'stopped'].includes(s.state);
+  const view = s.browser || null;
+  const live = inMain(s) ? s.in_front || !s.shot_url : shownLive(s);
+  const interactive = shownLive(s) && ['new', 'needs', 'paused', 'done', 'stopped'].includes(s.state);
   $('s-browser').classList.toggle('mine', interactive && !needs);
   $('s-browser').classList.toggle('needs', needs);
   $('s-driving').hidden = !interactive || needs || s.state === 'paused';
   const tag = $('s-tag');
   tag.className = 'tag' + (live ? ' live' : '');
-  tag.lastElementChild.textContent = !live ? 'Last screenshot' : s.in_front ? 'Live' : 'Live · another tab in front';
+  tag.lastElementChild.textContent = !live ? 'Last screenshot' : shownLive(s) ? 'Live' : 'Live · another tab in front';
   showUrl(liveUrl(s) || s.url || 'about:blank', Boolean(s.tab) && !['working', 'waiting'].includes(s.state));
   showLive(live);
   if (!live) $('s-keyboard').hidden = true;
@@ -973,18 +1012,22 @@ function renderSession() {
   if (!live && s.shot_url && $('still').getAttribute('src') !== s.shot_url) $('still').src = s.shot_url;
   $('still').alt = `Last screenshot of ${title(s)}`;
   $('s-still-bar').hidden = live;
-  $('s-focus').disabled = Boolean(busyElsewhere);
+  $('s-focus').disabled = Boolean(busyElsewhere) || !s.browser?.open;
+  $('s-focus').hidden = !s.browser;
   const inFront = status.front_tab ? siteOf(status.front_tab.url) || status.front_tab.url : 'Another tab';
-  $('s-still-text').textContent = busyElsewhere
+  $('s-still-text').textContent = !s.browser
+    ? (s.waiting_for_browser ? waitingText(s) : 'Its browser closed to make room for another session. Message it to open a new one.')
+    : !s.browser.open ? browserGone(s)
+    : busyElsewhere
     ? `The browser is working on ${title(busyElsewhere)}. The live view comes back when it is done.`
     : driving ? `${inFront} is in front. This is the run's last screenshot; it brings its tab back on its next step.`
     : s.state === 'paused' ? `${inFront} is in front. Bring this tab back to the front to take over in it.`
     : 'Showing the last screenshot. Bring this tab to the front to see it live.';
   // A hidden live view takes no input, so it is view-only too.
-  if (live) connectLive(!interactive);
-  else if (rfb) connectLive(true);
+  if (live && view) connectLive(!interactive, view);
+  else if (rfb) connectLive(true, rfbView);
 
-  renderNow(s, busyElsewhere);
+  renderNow(s);
   renderThread(s);
   $('reply').placeholder = needs ? 'e.g. I signed in with Google, carry on' : s.state === 'working' || s.state === 'waiting' ? 'Message Stealthbox about this tab…'
     : s.state === 'new' ? 'Ask Stealthbox to do something in this tab…' : 'e.g. Now sort by price';
@@ -1200,18 +1243,33 @@ function showLive(shown) {
 // noVNC takes a moment to connect, longer through the share, and its screen is blank
 // until then. A picture of the display sits under it meanwhile; the first frame,
 // the same display at the same scale, covers it exactly.
-function connectLive(viewOnly) {
+// `view` is the browser to show: its viewer and preview paths.
+function connectLive(viewOnly, view) {
+  if (rfb && rfbView.viewer !== view.viewer) {
+    // Another browser: let this connection go, and connect to that one's display.
+    const old = rfb;
+    rfb = null;
+    old.disconnect();
+  }
   if (!rfb) {
     const width = Math.round($('live').clientWidth * devicePixelRatio) || 1280;
     const next = new Image();
     next.onload = () => { $('poster').src = next.src; };
-    next.src = `/v1/browser/screenshot?width=${width}&t=${Date.now()}`;
+    next.src = `${view.preview}${view.preview.includes('?') ? '&' : '?'}width=${width}&t=${Date.now()}`;
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    rfb = new RFB($('live'), `${scheme}://${location.host}/viewer/websockify`);
+    const connection = new RFB($('live'), `${scheme}://${location.host}${view.viewer}`);
+    rfb = connection;
+    rfbView = view;
     rfb.scaleViewport = true;
     rfb.background = 'transparent';
     rfb.addEventListener('connect', () => { $('live').dataset.connected = 'true'; });
-    rfb.addEventListener('disconnect', () => { $('live').dataset.connected = 'false'; rfb = null; setTimeout(renderSession, 2000); });
+    rfb.addEventListener('disconnect', () => {
+      // A connection let go for another browser's is already replaced.
+      if (rfb !== connection) return;
+      $('live').dataset.connected = 'false';
+      rfb = null;
+      setTimeout(renderSession, 2000);
+    });
   }
   rfb.viewOnly = viewOnly;
   $('live').dataset.viewOnly = String(viewOnly);
@@ -1279,13 +1337,6 @@ async function listen() {
 
 async function act(name, s) {
   $('s-error').hidden = true;
-  if (name === 'go-to-busy') {
-    // That run may have ended since the button was drawn; then this one simply redraws.
-    const busy = sessions.find((other) => other.session !== s.session && ['working', 'paused'].includes(other.state));
-    if (busy) selected = busy.session;
-    render();
-    return;
-  }
   const run = s.running_run;
   if (name === 'pause' || name === 'resume' || name === 'cancel') await api('POST', `/v1/runs/${run}/${name}`);
   if (name === 'close') { await api('POST', `/v1/sessions/${s.session}/close`); selected = null; }
@@ -1364,7 +1415,7 @@ $('s-compose').addEventListener('submit', async (event) => {
     // The tab in front: its own session if it has one, otherwise a new session in it.
     const tab = status.front_tab;
     if (!text || !tab) return;
-    const owner = sessions.find((other) => other.tab === tab.id);
+    const owner = sessions.find((other) => inMain(other) && other.tab === tab.id);
     try {
       const run = await api('POST', '/v1/chat', owner ? { message: text, session: owner.session, wait: false }
         : { message: text, tab: tab.id, wait: false });

@@ -193,8 +193,13 @@ def reserve_persona_desktop(screen):
     config, count = re.subn(r"<keybind key=.*?</keybind>\s*", "", config, flags=re.S)
     assert count > 0, "openbox rc.xml has no key bindings to remove"
     os.makedirs(os.path.dirname(OPENBOX_CONFIG), exist_ok=True)
-    with open(OPENBOX_CONFIG, "w") as f:
+    # Every display's openbox reads this one file, and session browsers start at the
+    # same time: write it whole, so none reads it half-written.
+    partial = f"{OPENBOX_CONFIG}.{os.getpid()}"
+    with open(partial, "w") as f:
         f.write(config)
+    os.replace(partial, OPENBOX_CONFIG)
+    # The openbox of this browser's display ($DISPLAY, which cdp-server sets).
     subprocess.run(["openbox", "--reconfigure"], check=True)
     # The desktop count in rc.xml is read only when openbox starts; set it now.
     subprocess.run(["xdotool", "set_num_desktops", "1"], check=True)

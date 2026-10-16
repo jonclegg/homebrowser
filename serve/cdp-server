@@ -13,12 +13,17 @@ Client:
     browser = pw.chromium.connect_over_cdp(
         "http://host:9222?fingerprint=12345&timezone=America/New_York&locale=en-US"
     )
+
+Session browsers (one per Stealthbox session, each on its own X display):
+    POST /sessions/<key>/open, then connect_over_cdp("http://host:9222/sessions/<key>")
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -63,6 +68,9 @@ BASE_CHROME_ARGS = [
 ]
 
 BASE_CDP_PORT = 5100
+# How long a starting Chrome has to answer on its CDP port. Several session browsers
+# starting at once on a busy machine took more than 10 seconds.
+CDP_START_SECONDS = 45.0
 
 # The default identity keeps its seed inside its own profile directory, so
 # whoever keeps the profile keeps the fingerprint. A fresh random seed on every
@@ -91,6 +99,27 @@ WINDOW_RESIZE_SECONDS = 5.0
 
 SAFE_SEED_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 RESERVED_SEEDS = {"__default__"}
+
+# Session browsers: one per Stealthbox session, so sessions work at the same time.
+# Each has an X display of its own (its own mouse, keyboard and live view) and a
+# copy of the default identity's profile, so it is the same machine, signed in
+# where the default identity is. The default identity's display is :99.
+SESSION_KEY_RE = re.compile(r"^s_[A-Za-z0-9_-]{1,120}$")
+MAIN_DISPLAY = 99
+# Display :N's VNC server listens on VNC_BASE_PORT + N - MAIN_DISPLAY (:99 on 5900).
+VNC_BASE_PORT = 5900
+# websockify serves each session's display under the session's key, from one file
+# per session here (stealthbox-serve.sh starts it with this token directory).
+VIEWER_TOKENS_DIR = os.environ.get("STEALTHBOX_VIEWER_TOKENS", "/tmp/viewer-tokens")
+DISPLAY_START_SECONDS = 10.0
+# Left out of a session's profile copy: caches the browser rebuilds, the open tabs
+# (a session starts with a blank tab, not the default identity's), and the lock
+# files that would tell Chrome the profile is in use.
+PROFILE_COPY_SKIPS = shutil.ignore_patterns(
+    "Cache", "Code Cache", "GPUCache", "CacheStorage", "Sessions", "component_crx_cache",
+    "GrShaderCache", "GPUPersistentCache", "ShaderCache", "DawnWebGPUCache", "DawnGraphiteCache",
+    "BrowserMetrics*", "Singleton*",
+)
 TRUSTED_WS_ORIGINS = {"devtools://devtools", "chrome-devtools://devtools"}
 
 
@@ -179,6 +208,66 @@ def _reject_untrusted_origin(request: web.Request) -> web.Response | None:
 
 
 # ---------------------------------------------------------------------------
+# Display — a session browser's own X server, window manager and VNC server
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Display:
+    number: int
+    processes: list[subprocess.Popen]
+
+    @property
+    def name(self) -> str:
+        return f":{self.number}"
+
+    @property
+    def vnc_port(self) -> int:
+        return VNC_BASE_PORT + self.number - MAIN_DISPLAY
+
+
+def start_display(number: int, size: str) -> Display:
+    """Start Xvfb :number, openbox and x11vnc on it, as the entrypoint does for :99."""
+    for stale in (f"/tmp/.X{number}-lock", f"/tmp/.X11-unix/X{number}"):
+        # Left by a display whose cdp-server was killed; Xvfb refuses to start over it.
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(stale)
+    env = {**os.environ, "DISPLAY": f":{number}"}
+    xvfb = subprocess.Popen(["Xvfb", f":{number}", "-screen", "0", f"{size}x24", "-nolisten", "tcp"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    display = Display(number, [xvfb])
+    deadline = time.monotonic() + DISPLAY_START_SECONDS
+    while subprocess.run(["xdotool", "getdisplaygeometry"], env=env, capture_output=True).returncode != 0:
+        if time.monotonic() > deadline or xvfb.poll() is not None:
+            stop_display(display)
+            raise RuntimeError(f"Xvfb :{number} did not start")
+        time.sleep(0.2)
+    # Window manager first: Chrome's --start-maximized is a no-op without one.
+    display.processes.insert(0, subprocess.Popen(["openbox"], env=env, stdout=subprocess.DEVNULL,
+                                                 stderr=subprocess.DEVNULL))
+    display.processes.insert(0, subprocess.Popen(
+        ["x11vnc", "-display", f":{number}", "-forever", "-shared", "-nopw", "-localhost",
+         "-rfbport", str(display.vnc_port), "-quiet"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    return display
+
+
+def stop_display(display: Display) -> None:
+    """Stop a display's processes: VNC server, window manager, then the X server."""
+    for process in display.processes:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def viewer_token_path(key: str) -> str:
+    return os.path.join(VIEWER_TOKENS_DIR, key)
+
+
+# ---------------------------------------------------------------------------
 # ChromeProcess — one running Chrome instance
 # ---------------------------------------------------------------------------
 
@@ -194,6 +283,8 @@ class ChromeProcess:
     geoip: bool = False
     extra_args: tuple[str, ...] = ()
     last_used: float = 0.0
+    # A session browser's own display; None for the browsers on :99.
+    display: Display | None = None
 
 
 def launch_conflicts(
@@ -471,99 +562,181 @@ class ChromePool:
             user_data_dir = os.path.join(self._data_dir, seed_key)
             os.makedirs(user_data_dir, exist_ok=True)
             actual_seed = seed if seed is not None else self._persistent_default_seed(user_data_dir)
+            cp = await self._launch(seed_key, actual_seed, user_data_dir, None, extra_args, timezone, locale,
+                                    proxy, geoip)
+            if seed is None:
+                self._default = cp
+            return cp
 
-            # Resolve geoip if requested; with no proxy this is the machine's own egress IP
-            exit_ip = None
-            if geoip:
+    async def open_session(self, key: str) -> ChromeProcess:
+        """Start a session's browser, or return it if it is running.
+
+        It runs on a display of its own, from a copy of the default identity's
+        profile with the default identity's seed: the same machine, signed in where
+        the default identity is. The copy is deleted when the browser closes.
+        """
+        if not SESSION_KEY_RE.match(key):
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid session key"}),
+                                     content_type="application/json")
+        # The copy is taken from the default profile, so it has to exist, seed included.
+        default = await self.get_or_launch(seed=None)
+        async with self._get_lock(key):
+            if key in self._processes:
+                proc = self._processes[key]
+                if proc.process.poll() is None:
+                    self._touch(key)
+                    return proc
+                await self._cleanup_process(key)
+            await self._make_room()
+            user_data_dir = os.path.join(self._data_dir, key)
+            await asyncio.to_thread(self._safe_rmtree, user_data_dir)
+            await asyncio.to_thread(shutil.copytree, default.user_data_dir, user_data_dir,
+                                    symlinks=True, ignore=PROFILE_COPY_SKIPS)
+            display = await asyncio.to_thread(start_display, self._free_display(),
+                                              os.environ.get("STEALTHBOX_DISPLAY_SIZE", "1920x1080"))
+            try:
+                # Launched as the default identity was, so both present the same machine.
+                cp = await self._launch(key, default.seed, user_data_dir, display, None, self._default_timezone,
+                                        self._default_locale, None, self._default_geoip)
+            except BaseException:
+                await asyncio.to_thread(stop_display, display)
+                await asyncio.to_thread(self._safe_rmtree, user_data_dir)
+                raise
+            os.makedirs(VIEWER_TOKENS_DIR, exist_ok=True)
+            with open(viewer_token_path(key), "w") as fh:
+                fh.write(f"{key}: localhost:{display.vnc_port}\n")
+            return cp
+
+    def _free_display(self) -> int:
+        """The lowest display number above :99 that no session browser has."""
+        taken = {proc.display.number for proc in self._processes.values() if proc.display}
+        return next(number for number in itertools.count(MAIN_DISPLAY + 1) if number not in taken)
+
+    async def process_for_target(self, target: str) -> ChromeProcess:
+        """The running browser that has this page target (tab) open."""
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            for proc in list(self._processes.values()):
+                if proc.process.poll() is not None:
+                    continue
                 try:
-                    timezone, locale, exit_ip = await asyncio.to_thread(
-                        maybe_resolve_geoip, True, proxy, timezone, locale
-                    )
-                except (RuntimeError, ImportError) as exc:
-                    raise web.HTTPBadGateway(
-                        text=json.dumps({"error": f"GeoIP resolution failed: {exc}"}),
-                        content_type="application/json",
-                    )
+                    async with session.get(f"http://127.0.0.1:{proc.cdp_port}/json/list") as resp:
+                        targets = await resp.json()
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    # Closing or hung; it cannot be the one a caller is driving.
+                    continue
+                if any(entry.get("id") == target for entry in targets):
+                    self._touch(next(key for key, item in self._processes.items() if item is proc))
+                    return proc
+        raise web.HTTPNotFound(text=json.dumps({"error": f"no open tab {target}"}),
+                               content_type="application/json")
 
-            # Build Chrome args via shared logic; CLI fingerprint flags are
-            # defaults that per-connection params override.
-            fp_extra = [f"--fingerprint={actual_seed}"] + self._default_fingerprint_args
-            if extra_args:
-                fp_extra.extend(extra_args)
-            if proxy:
-                fp_extra.append(f"--proxy-server={_normalize_socks_string_url(proxy)}")
-
-            # WebRTC IP spoofing: resolve auto, inject geoip exit IP
-            fp_extra = _resolve_webrtc_args(fp_extra, proxy)
-            if exit_ip and not any(a.startswith("--fingerprint-webrtc-ip") for a in (fp_extra or [])):
-                fp_extra = list(fp_extra or [])
-                fp_extra.append(f"--fingerprint-webrtc-ip={exit_ip}")
-
-            chrome_args = build_args(
-                stealth_args=True,
-                extra_args=fp_extra,
-                timezone=timezone,
-                locale=locale,
-                headless=self._headless,
-            )
-
-            port = self._allocate_port()
-            full_args = (
-                [self._binary]
-                + BASE_CHROME_ARGS
-                + chrome_args
-                + self._global_args
-                + [
-                    f"--remote-debugging-port={port}",
-                    "--remote-debugging-address=127.0.0.1",
-                    f"--user-data-dir={user_data_dir}",
-                ]
-            )
-
-            logger.info("Launching Chrome (seed=%s, port=%d)", actual_seed, port)
-            process = subprocess.Popen(
-                full_args,
-                stdout=subprocess.DEVNULL,
-            )
-
-            # Wait for CDP to be ready
-            if not await self._wait_for_cdp(port):
-                await self._abandon_launch(process, user_data_dir)
+    async def _launch(
+        self,
+        seed_key: str,
+        actual_seed: str,
+        user_data_dir: str,
+        display: Display | None,
+        extra_args: list[str] | None,
+        timezone: str | None,
+        locale: str | None,
+        proxy: str | None,
+        geoip: bool,
+    ) -> ChromeProcess:
+        """Start Chrome for a pool key and wait for its CDP endpoint. Under the key's lock."""
+        # Resolve geoip if requested; with no proxy this is the machine's own egress IP
+        exit_ip = None
+        if geoip:
+            try:
+                timezone, locale, exit_ip = await asyncio.to_thread(
+                    maybe_resolve_geoip, True, proxy, timezone, locale
+                )
+            except (RuntimeError, ImportError) as exc:
                 raise web.HTTPBadGateway(
-                    text=json.dumps({"error": "Chrome failed to start"}),
+                    text=json.dumps({"error": f"GeoIP resolution failed: {exc}"}),
                     content_type="application/json",
                 )
 
-            if self._settle_window_geometry:
-                try:
-                    await self._settle_window(port)
-                except Exception as exc:
-                    logger.error("Window geometry could not be made coherent: %s", exc)
-                    await self._abandon_launch(process, user_data_dir)
-                    raise web.HTTPBadGateway(
-                        text=json.dumps({"error": f"Window geometry could not be made coherent: {exc}"}),
-                        content_type="application/json",
-                    )
+        # Build Chrome args via shared logic; CLI fingerprint flags are
+        # defaults that per-connection params override.
+        fp_extra = [f"--fingerprint={actual_seed}"] + self._default_fingerprint_args
+        if extra_args:
+            fp_extra.extend(extra_args)
+        if proxy:
+            fp_extra.append(f"--proxy-server={_normalize_socks_string_url(proxy)}")
 
-            cp = ChromeProcess(
-                seed=actual_seed,
-                process=process,
-                cdp_port=port,
-                user_data_dir=user_data_dir,
-                timezone=timezone,
-                locale=locale,
-                proxy=proxy,
-                geoip=geoip,
-                extra_args=tuple(extra_args or ()),
-                last_used=time.monotonic(),
+        # WebRTC IP spoofing: resolve auto, inject geoip exit IP
+        fp_extra = _resolve_webrtc_args(fp_extra, proxy)
+        if exit_ip and not any(a.startswith("--fingerprint-webrtc-ip") for a in (fp_extra or [])):
+            fp_extra = list(fp_extra or [])
+            fp_extra.append(f"--fingerprint-webrtc-ip={exit_ip}")
+
+        chrome_args = build_args(
+            stealth_args=True,
+            extra_args=fp_extra,
+            timezone=timezone,
+            locale=locale,
+            headless=self._headless,
+        )
+
+        port = self._allocate_port()
+        full_args = (
+            [self._binary]
+            + BASE_CHROME_ARGS
+            + chrome_args
+            + self._global_args
+            + [
+                f"--remote-debugging-port={port}",
+                "--remote-debugging-address=127.0.0.1",
+                f"--user-data-dir={user_data_dir}",
+            ]
+        )
+
+        logger.info("Launching Chrome (seed=%s, port=%d)", actual_seed, port)
+        # A session browser draws on its own display, which launch-browser's openbox
+        # setup and the native input for its tabs use too.
+        env = {**os.environ, "DISPLAY": display.name} if display else None
+        process = subprocess.Popen(
+            full_args,
+            stdout=subprocess.DEVNULL,
+            env=env,
+        )
+
+        # Wait for CDP to be ready
+        if not await self._wait_for_cdp(port):
+            await self._abandon_launch(process, user_data_dir)
+            raise web.HTTPBadGateway(
+                text=json.dumps({"error": "Chrome failed to start"}),
+                content_type="application/json",
             )
-            self._processes[seed_key] = cp
 
-            if seed is None:
-                self._default = cp
+        if self._settle_window_geometry:
+            try:
+                await self._settle_window(port)
+            except Exception as exc:
+                logger.error("Window geometry could not be made coherent: %s", exc)
+                await self._abandon_launch(process, user_data_dir)
+                raise web.HTTPBadGateway(
+                    text=json.dumps({"error": f"Window geometry could not be made coherent: {exc}"}),
+                    content_type="application/json",
+                )
 
-            logger.info("Chrome ready (seed=%s, port=%d, pid=%d)", actual_seed, port, process.pid)
-            return cp
+        cp = ChromeProcess(
+            seed=actual_seed,
+            process=process,
+            cdp_port=port,
+            user_data_dir=user_data_dir,
+            timezone=timezone,
+            locale=locale,
+            proxy=proxy,
+            geoip=geoip,
+            extra_args=tuple(extra_args or ()),
+            last_used=time.monotonic(),
+            display=display,
+        )
+        self._processes[seed_key] = cp
+
+        logger.info("Chrome ready (seed=%s, port=%d, pid=%d)", actual_seed, port, process.pid)
+        return cp
 
     def _persistent_default_seed(self, user_data_dir: str) -> str:
         """Read the default identity's seed from its profile, creating it once."""
@@ -632,6 +805,10 @@ class ChromePool:
             except subprocess.TimeoutExpired:
                 proc.process.kill()
         await asyncio.to_thread(self._safe_rmtree, proc.user_data_dir)
+        if proc.display is not None:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(viewer_token_path(key))
+            await asyncio.to_thread(stop_display, proc.display)
         if self._default is proc:
             self._default = None
         self._locks.pop(key, None)
@@ -667,7 +844,7 @@ class ChromePool:
         logger.info("All Chrome processes terminated")
 
     @staticmethod
-    async def _wait_for_cdp(port: int, timeout: float = 10.0) -> bool:
+    async def _wait_for_cdp(port: int, timeout: float = CDP_START_SECONDS) -> bool:
         """Poll Chrome's /json/version until ready."""
         deadline = time.monotonic() + timeout
         delay = 0.1
@@ -912,9 +1089,11 @@ def xdotool_commands(action: dict, origin: tuple[int, int], zoom: float = 1.0) -
     raise ValueError(f"unknown input action type: {kind!r}")
 
 
-async def _run_xdotool(argv: list[str]) -> str:
+async def _run_xdotool(argv: list[str], cp: ChromeProcess) -> str:
+    """Run xdotool on the display of the browser `cp`."""
+    env = {**os.environ, "DISPLAY": cp.display.name} if cp.display else None
     process = await asyncio.create_subprocess_exec(
-        "xdotool", *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        "xdotool", *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
     )
     stdout, stderr = await process.communicate()
     if process.returncode != 0:
@@ -922,9 +1101,9 @@ async def _run_xdotool(argv: list[str]) -> str:
     return stdout.decode()
 
 
-async def pointer_location(origin: tuple[int, int], zoom: float) -> list[float]:
+async def pointer_location(origin: tuple[int, int], zoom: float, cp: ChromeProcess) -> list[float]:
     """Where the pointer is, in the page's viewport CSS pixels (off the page included)."""
-    shell = dict(line.split("=", 1) for line in (await _run_xdotool(["getmouselocation", "--shell"])).split())
+    shell = dict(line.split("=", 1) for line in (await _run_xdotool(["getmouselocation", "--shell"], cp)).split())
     return [(int(shell["X"]) - origin[0]) / zoom, (int(shell["Y"]) - origin[1]) / zoom]
 
 
@@ -959,8 +1138,7 @@ async def handle_window(request: web.Request) -> web.Response:
     target = _page_target(await request.json())
     if target is None:
         return web.json_response({"error": "target must be a page target id"}, status=400)
-    pool: ChromePool = request.app["pool"]
-    cp = await pool.get_or_launch(seed=request.match_info.get("seed"))
+    cp = await request.app["pool"].process_for_target(target)
     async with websockets.connect(f"ws://127.0.0.1:{cp.cdp_port}/devtools/page/{target}", max_size=None) as ws:
         geometry = await settle_window(CdpSession(ws))
     return web.json_response({"ok": True, "geometry": geometry})
@@ -986,8 +1164,8 @@ async def handle_input(request: web.Request) -> web.Response:
     ):
         return web.json_response({"error": f"actions must be objects with type in {sorted(INPUT_ACTION_TYPES)}"}, status=400)
 
-    pool: ChromePool = request.app["pool"]
-    cp = await pool.get_or_launch(seed=request.match_info.get("seed"))
+    # The browser that has the tab, and so the display its input goes to.
+    cp = await request.app["pool"].process_for_target(target)
 
     async with websockets.connect(f"ws://127.0.0.1:{cp.cdp_port}/devtools/page/{target}", max_size=None) as ws:
         cdp = CdpSession(ws)
@@ -1007,9 +1185,9 @@ async def handle_input(request: web.Request) -> web.Response:
             if delay:
                 await asyncio.sleep(delay)
             if argv:
-                await _run_xdotool(argv)
+                await _run_xdotool(argv, cp)
     return web.json_response({"ok": True, "origin": list(origin), "zoom": zoom, "actions": len(actions),
-                              "cursor": await pointer_location(origin, zoom)})
+                              "cursor": await pointer_location(origin, zoom, cp)})
 
 
 async def handle_root(request: web.Request) -> web.Response:
@@ -1028,6 +1206,7 @@ async def handle_root(request: web.Request) -> web.Response:
                 "locale": proc.locale,
                 "proxy": proc.proxy,
                 "geoip": proc.geoip,
+                "display": proc.display.name if proc.display else None,
             }
     return web.json_response({
         "status": "ok",
@@ -1063,11 +1242,34 @@ async def handle_history(request: web.Request) -> web.Response:
     return web.json_response({"suggestions": found})
 
 
-async def handle_json_version(request: web.Request) -> web.Response:
-    """Proxy /json/version with optional per-seed routing."""
+async def _proxy_json(request: web.Request, cp: ChromeProcess, endpoint: str, prefix: str) -> web.Response:
+    """Chrome's /json/version or /json/list, its WebSocket URLs routed through this server.
+
+    prefix is the route in front of /devtools/: "" for the default identity,
+    "fingerprint/<seed>/" or "sessions/<key>/".
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"http://127.0.0.1:{cp.cdp_port}/json/{endpoint}",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                data = await resp.json()
+    except Exception as exc:
+        logger.error("Failed to reach Chrome CDP (port %d): %s", cp.cdp_port, exc)
+        return web.json_response({"error": "CDP endpoint unreachable"}, status=502)
+
+    base = f"{_ws_scheme(request)}://{_external_host(request)}/{prefix}devtools/"
+    for entry in data if isinstance(data, list) else [data]:
+        if "webSocketDebuggerUrl" in entry:
+            entry["webSocketDebuggerUrl"] = base + entry["webSocketDebuggerUrl"].split("/devtools/")[-1]
+    return web.json_response(data)
+
+
+async def _launch_for_params(request: web.Request) -> tuple[ChromeProcess, str]:
+    """The browser a /json request's query names, launched if needed, and its route prefix."""
     pool: ChromePool = request.app["pool"]
     params = parse_connection_params(request.query_string)
-
     cp = await pool.get_or_launch(
         seed=params["seed"],
         extra_args=params["extra_args"] or None,
@@ -1076,75 +1278,50 @@ async def handle_json_version(request: web.Request) -> web.Response:
         proxy=params["proxy"],
         geoip=params["geoip"],
     )
+    return cp, f"fingerprint/{params['seed']}/" if params["seed"] else ""
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"http://127.0.0.1:{cp.cdp_port}/json/version",
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                data = await resp.json()
-    except Exception as exc:
-        logger.error("Failed to reach Chrome CDP (port %d): %s", cp.cdp_port, exc)
-        return web.json_response({"error": "CDP endpoint unreachable"}, status=502)
 
-    # Rewrite webSocketDebuggerUrl to route through our multiplexer
-    host = _external_host(request)
-    seed_key = params["seed"]
-    if seed_key:
-        ws_path = f"fingerprint/{seed_key}/devtools/browser"
-    else:
-        ws_path = "devtools/browser"
-
-    # Extract the browser GUID from Chrome's original URL
-    orig_ws = data.get("webSocketDebuggerUrl", "")
-    guid = orig_ws.rsplit("/", 1)[-1] if "/devtools/" in orig_ws else ""
-
-    scheme = _ws_scheme(request)
-    data["webSocketDebuggerUrl"] = f"{scheme}://{host}/{ws_path}/{guid}"
-    return web.json_response(data)
+async def handle_json_version(request: web.Request) -> web.Response:
+    """Proxy /json/version with optional per-seed routing."""
+    cp, prefix = await _launch_for_params(request)
+    return await _proxy_json(request, cp, "version", prefix)
 
 
 async def handle_json_list(request: web.Request) -> web.Response:
     """Proxy /json/list with per-seed routing. Rewrites all entries."""
+    cp, prefix = await _launch_for_params(request)
+    return await _proxy_json(request, cp, "list", prefix)
+
+
+def _session_process(request: web.Request) -> ChromeProcess:
+    """The session browser a /sessions/<key>/... request names; 404 unless it is open."""
     pool: ChromePool = request.app["pool"]
-    params = parse_connection_params(request.query_string)
+    key = request.match_info["key"]
+    proc = pool._processes.get(key) if SESSION_KEY_RE.match(key) else None
+    if proc is None or proc.process.poll() is not None:
+        raise web.HTTPNotFound(text=json.dumps({"error": f"no session browser {key}; POST /sessions/{key}/open"}),
+                               content_type="application/json")
+    return proc
 
-    cp = await pool.get_or_launch(
-        seed=params["seed"],
-        extra_args=params["extra_args"] or None,
-        timezone=params["timezone"],
-        locale=params["locale"],
-        proxy=params["proxy"],
-        geoip=params["geoip"],
-    )
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"http://127.0.0.1:{cp.cdp_port}/json/list",
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                data = await resp.json()
-    except Exception as exc:
-        logger.error("Failed to reach Chrome CDP (port %d): %s", cp.cdp_port, exc)
-        return web.json_response({"error": "CDP endpoint unreachable"}, status=502)
+async def handle_session_open(request: web.Request) -> web.Response:
+    """Start a session's browser (or find it running): POST /sessions/<key>/open."""
+    key = request.match_info["key"]
+    cp = await request.app["pool"].open_session(key)
+    return web.json_response({"session": key, "display": cp.display.name, "viewer_token": key})
 
-    host = _external_host(request)
-    scheme = _ws_scheme(request)
-    seed_key = params["seed"]
 
-    for entry in data:
-        if "webSocketDebuggerUrl" in entry:
-            ws_tail = entry["webSocketDebuggerUrl"].split("/devtools/")[-1]
-            if seed_key:
-                entry["webSocketDebuggerUrl"] = (
-                    f"{scheme}://{host}/fingerprint/{seed_key}/devtools/{ws_tail}"
-                )
-            else:
-                entry["webSocketDebuggerUrl"] = f"{scheme}://{host}/devtools/{ws_tail}"
+async def handle_session_close(request: web.Request) -> web.Response:
+    """Close a session's browser and delete its profile copy. Idempotent."""
+    key = request.match_info["key"]
+    if not SESSION_KEY_RE.match(key):
+        return web.json_response({"error": "Invalid session key"}, status=400)
+    return web.json_response({"session": key, "terminated": await request.app["pool"].terminate_seed(key)})
 
-    return web.json_response(data)
+
+async def handle_session_json(request: web.Request) -> web.Response:
+    key = request.match_info["key"]
+    return await _proxy_json(request, _session_process(request), request.match_info["endpoint"], f"sessions/{key}/")
 
 
 # ---------------------------------------------------------------------------
@@ -1196,6 +1373,10 @@ async def proxy_cdp_websocket(
 
     except Exception as exc:
         logger.error("%s error: %s", label, exc)
+    finally:
+        # Chrome's end went away (it quit with its last tab, or crashed): end the
+        # client's too, or it goes on believing it is connected to a browser.
+        await client_ws.close()
 
 
 async def handle_ws_default(request: web.Request) -> web.StreamResponse:
@@ -1242,6 +1423,30 @@ async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
         await proxy_cdp_websocket(ws, target_url, f"CDP seed={seed} [{path}]")
     finally:
         pool.disconnect(seed)
+    return ws
+
+
+async def handle_ws_session(request: web.Request) -> web.StreamResponse:
+    """WebSocket proxy for a session browser: /sessions/{key}/devtools/{type}/{guid}"""
+    rejected = _reject_untrusted_origin(request)
+    if rejected is not None:
+        return rejected
+
+    pool: ChromePool = request.app["pool"]
+    key = request.match_info["key"]
+    path = request.match_info.get("path", "")
+    cp = _session_process(request)
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    # While a client is connected the browser stays; once the last one leaves it
+    # closes after the idle timeout, so a caller that dies leaves nothing running.
+    pool.connect(key)
+    try:
+        await proxy_cdp_websocket(ws, f"ws://127.0.0.1:{cp.cdp_port}/devtools/{path}", f"CDP session={key} [{path}]")
+    finally:
+        pool.disconnect(key)
     return ws
 
 
@@ -1405,11 +1610,15 @@ def main() -> None:
 
     # WebSocket routes — seed-specific (must be before default to match first)
     app.router.add_post("/fingerprint/{seed}/close", handle_close)
-    app.router.add_post("/fingerprint/{seed}/input", handle_input)
+    # Native input and window settling find the tab's own browser, and so its display.
     app.router.add_post("/input", handle_input)
-    app.router.add_post("/fingerprint/{seed}/window", handle_window)
     app.router.add_post("/window", handle_window)
     app.router.add_get("/fingerprint/{seed}/devtools/{path:.+}", handle_ws_seed)
+    app.router.add_post("/sessions/{key}/open", handle_session_open)
+    app.router.add_post("/sessions/{key}/close", handle_session_close)
+    app.router.add_get(r"/sessions/{key}/json/{endpoint:version|list}", handle_session_json)
+    app.router.add_get(r"/sessions/{key}/json/{endpoint:version|list}/", handle_session_json)
+    app.router.add_get("/sessions/{key}/devtools/{path:.+}", handle_ws_session)
     # WebSocket routes — default (no seed)
     app.router.add_get("/devtools/{path:.+}", handle_ws_default)
 

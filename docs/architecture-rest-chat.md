@@ -278,7 +278,7 @@ What shipped on `stealthbox-deepseek`, and where it departs from the proposal ab
 | OpenRouter key in `.env` | `stealthbox key` opens a local page (`/setup`, one-time code, localhost only) where the user pastes it; the API checks it with OpenRouter and writes `~/.stealthbox/data/openrouter.key`, mode 600. The key never passes through an agent's chat, and `--in-browser` opens the page in Stealthbox's browser for a user reaching it through the viewer. |
 | Token in `~/.stealthbox/api-token` | `~/.stealthbox/data/api-token`. The data folder is bind-mounted at `/data`, and the API runs as the folder's owner so files are not root's on Linux. |
 | `stealthbox do` as a thin client | Replaced by `stealthbox chat`, `run`, `cancel`, `notes` ([`agent/client.py`](../agent/client.py), standard library). |
-| One run at a time | Same: one worker thread owns Playwright and drains a queue. Sessions idle out after 30 minutes and close their tab. |
+| One run at a time | Replaced: each session has a browser of its own (cdp-server starts one on its own X display), with a worker thread that owns its Playwright and drains its queue, so sessions run at the same time. A tab a caller lends works in the main browser. Sessions idle out after 30 minutes and close their browser. |
 | — | Shared-browser repairs: other CDP clients can shrink the window or close the tab mid-run (seen on the Dell). Each step maximizes a shrunken window and replaces a closed tab, and the run lists those `repairs`. |
 | — | A stall check: three identical actions, or six steps on one URL using at most two different actions, puts a warning in the next prompt. |
 

@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import weakref
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:9222")
 
@@ -40,10 +40,9 @@ def pause(low=0.35, high=1.1):
 ###############################################################################
 
 def _cdp_server_url(endpoint):
+    # cdp-server finds the browser that has the tab, whichever identity or session it is.
     parsed = urlparse(CDP_URL)
-    seed = parse_qs(parsed.query).get("fingerprint", [None])[0]
-    base = f"{parsed.scheme}://{parsed.netloc}"
-    return f"{base}/fingerprint/{seed}/{endpoint}" if seed else f"{base}/{endpoint}"
+    return f"{parsed.scheme}://{parsed.netloc}/{endpoint}"
 
 ###############################################################################
 

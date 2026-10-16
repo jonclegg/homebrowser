@@ -123,12 +123,13 @@ The console is one page, built for a phone as much as a desktop: sessions on one
 browser beside its conversation. From it the user can start a session, message one (a message
 to a busy session queues behind its run), **Take over** a working run (it holds after its
 current step and the live view takes their clicks), **Hand back**, **Stop**, press **Done,
-carry on** on one that needs them, **Show it live** for a tab that is in the background, and
-**Close** a session. It updates live from the event stream. While a session works, its message
+carry on** on one that needs them, and **Close** a session (its browser closes). Each session's
+live view is its own browser.
+A session that lost its browser to a newer one shows its last screenshot until its next message. It updates live from the event stream. While a session works, its message
 shows what the current step is doing (looking at the page, thinking, or the action it chose),
 the model's reason, and how long it has taken; each finished step keeps its reason and the
-model's reasoning text. The **Browser** entry, with a live preview, shows the tab in front
-whoever drives it: the user can click and type in it, type an address in its address bar, go
+model's reasoning text. The **Browser** entry, with a live preview, shows the main browser's tab
+in front (the one programs drive over CDP), whoever drives it: the user can click and type in it, type an address in its address bar, go
 full screen, and message Stealthbox about that tab (it continues the tab's session, or starts
 one in the tab). The sidebar icon hides the sessions. **Password & devices** changes the console password (it asks for
 the current one, and signs out every other device), lists the browsers signed in, and signs
@@ -208,9 +209,14 @@ steps guards against a page whose animation never stops).
 | `needs_user` | The user has to act in the page: sign in, pay, or clear a bot check it could not. | Send them `needs_user.task` and `needs_user.share_url` now. When they're done, continue with `--session`. See [Handing off to the user](#handing-off-to-the-user). |
 | `failed` / `step_limit` | It did not get there. | Read `stealthbox run <id>`; rephrase, or raise `--max-stuck-steps`. |
 
-A **session** is one tab and its conversation. Without `--session` you get a new tab. Pass
+A **session** is a tab and its conversation. Without `--session` you get a new session. Pass
 the session id from the last reply to follow up in the same tab. Sessions expire after 30
-idle minutes. One browser has one mouse, so runs queue.
+idle minutes. A browser has one mouse, so each session works in a browser of its own: sessions
+run at the same time. Each one starts from a copy of the saved profile (signed in where you are),
+and the cookies it sets go back to the saved profile, so a sign-in in a session lasts. At most
+`STEALTHBOX_SESSION_BROWSERS` (default 3) are open at once. At the limit, a new session takes the
+browser of the session that finished longest ago; with none finished it waits. A run in a tab you
+lend (`--tab`) works in the main browser, the one you drive over CDP.
 
 **What it can do beyond clicking:** `read` (the page's text and links, for prices and listing
 URLs), `back`, `goto` (only on a site it has already entered; other sites go through
@@ -444,9 +450,10 @@ For the console on a phone: `docker exec stealthbox stealthbox share`.
 
 - **`stealthbox` container:** the image `stealthbox:local`: [`cdp-server`](../../serve/cdp-server), the Fury core in `/opt/fury`, x11vnc, noVNC and the chat API. `cdp-server` launches the core through [`image/launch-browser`](../../image/launch-browser), which turns the seed, timezone and locale into a persona config: a real machine from Fury's catalogue whose screen is the container's display (a Mac's 2880x1800 on a Mac host). `stealthbox start` builds it from this folder ([`docker-compose.yml`](../../docker-compose.yml), [`image/Dockerfile`](../../image/Dockerfile)). Runs `cdp-server` headed on a virtual display (passes more bot checks; it's what the viewer shows). `shm_size: 2gb` (Chromium crashes at the 64 MB default). Healthcheck on `/json/version`.
 - **Volumes:** `profile` (cookies and logins) and `cache` (the GeoIP database). [`image/stealthbox-serve.sh`](../../image/stealthbox-serve.sh) keeps `cdp-server` from deleting the profile on exit.
-- **cdp-server:** the default identity's seed is saved in the profile (`.cdp-server-seed`), so the fingerprint survives restarts with the cookies. Timezone and locale come from GeoIP of the egress IP (`--geoip`). The window is sized so the geometry pages read stays on screen, GPU/CPU/memory come from one coherent profile per seed, `POST /input` gives real X11 input, and `GET /history?q=` reads the default identity's history for the console's address bar (Chrome's profile is root's alone).
+- **cdp-server:** the default identity's seed is saved in the profile (`.cdp-server-seed`), so the fingerprint survives restarts with the cookies. Timezone and locale come from GeoIP of the egress IP (`--geoip`). The window is sized so the geometry pages read stays on screen, GPU/CPU/memory come from one coherent profile per seed, `POST /input` gives real X11 input on the display of whichever browser has the tab, and `GET /history?q=` reads the default identity's history for the console's address bar (Chrome's profile is root's alone).
 - **Persona:** on a Mac, `start.sh` adds `COMPOSE_FILE=docker-compose.yml:docker-compose.mac.yml` to `.env`, so the browser presents as a Mac (Apple GPU, a 1440x900 Retina screen, the Mac's own fonts mounted read-only). On an Apple Silicon host that persona clears some bot checks that the Windows persona fails. Linux hosts keep the Windows persona. Delete that line from `.env` to go back to Windows.
 - **Extra identities:** add `?fingerprint=<seed>` to the CDP URL, e.g. `http://127.0.0.1:9222?fingerprint=11111&timezone=Europe/Berlin`. Only the default identity is saved to `profile`. Idle extra identities close after 5 minutes, and at most 8 browsers run at once (the least recently used idle one closes to make room). Reconnecting to a running identity with different settings returns `409`; `POST /fingerprint/<seed>/close` first.
+- **Session browsers:** `POST /sessions/<key>/open` starts one: its own X display (Xvfb, openbox, x11vnc), and Chrome from a copy of the default profile (caches and open tabs left out) with the default identity's seed. Connect to `http://127.0.0.1:9222/sessions/<key>`; `POST /sessions/<key>/close` stops it and deletes the copy. The chat API opens one per session; its live view goes through `/viewer/sessions/<key>/websockify`.
 - **Updates:** run the installer again; `stealthbox start` rebuilds the image. `STEALTHBOX_IMAGE` in `.env` names another local image (a machine that cannot build, like one without buildx, runs an image built elsewhere and copied with `docker save | docker load`).
 - **Smoke test:** `stealthbox smoke <site> [<site> ...]` enters each site it is given (with none, the domains in `~/.stealthbox/data/smoke-sites.txt`, one per line; without that file it exits with an error asking for sites) from Bing on the API's browser worker, works any bot check when the OpenRouter key is set, and writes `report.html`, the screenshots and `result.json` to `~/.stealthbox/data/smoke/<id>/`.
 - **Console:** [`agent/console.html`](../../agent/console.html), served by the API at `/console`. It polls `GET /v1/events/next` rather than reading the SSE stream, because Cloudflare quick tunnels hold an SSE response until it ends. `/viewer/...` proxies noVNC (its files, and its websocket byte for byte), so one tunnel carries the console and the live browser. Every route but the sign-in, setup and password pages needs the bearer token or a device cookie ([`agent/console_auth.py`](../../agent/console_auth.py)), and a cookie is accepted only on the host it signed in through, from a page on that same origin.

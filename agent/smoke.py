@@ -65,7 +65,7 @@ def host_join(base, *parts):
     return separator.join([base.rstrip("\\/"), *parts])
 
 
-def check_site(context, smoke, site, notebook, has_key):
+def check_site(context, cdp_url, display, smoke, site, notebook, has_key):
     """Enter one site and screenshot it. Never raises: a failure is a result."""
     result = {"site": site, "ok": False, "challenge": [], "worked_challenge": False}
     before = set(context.pages)
@@ -82,7 +82,7 @@ def check_site(context, smoke, site, notebook, has_key):
         if blocks and has_key:
             result["worked_challenge"] = True
             run_dir = os.path.join(smoke.dir, "work", site)
-            turn = agent.Turn(f"{smoke.id}-{site}", context, CHALLENGE_MESSAGE, [], notebook,
+            turn = agent.Turn(f"{smoke.id}-{site}", context, cdp_url, display, CHALLENGE_MESSAGE, [], notebook,
                               run_dir, CHALLENGE_STEPS, agent.DEFAULT_MODEL)
             _, _, landed = agent.run_turn(landed, turn, lambda _turn: None, lambda *_phase: None)
             humanize.pause(2.0, 3.0)
@@ -96,7 +96,7 @@ def check_site(context, smoke, site, notebook, has_key):
     except Exception as exc:  # noqa: BLE001 - one site's failure is a result, not a crash
         result["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
     shot = f"{site}.png"
-    if agent.safe_screenshot(landed, os.path.join(smoke.dir, shot)):
+    if agent.safe_screenshot(landed, os.path.join(smoke.dir, shot), display):
         result["screenshot"] = shot
         if smoke.host_dir:
             result["host_screenshot"] = host_join(smoke.host_dir, shot)
@@ -109,11 +109,12 @@ def check_site(context, smoke, site, notebook, has_key):
     return result
 
 
-def run(context, smoke, notebook, has_key):
+def run(context, cdp_url, display, smoke, notebook, has_key):
+    """Check each site in the browser `context` (its CDP URL, and the X display it draws on)."""
     smoke.status = "running"
     os.makedirs(smoke.dir, exist_ok=True)
     for site in smoke.sites:
-        smoke.results.append(check_site(context, smoke, site, notebook, has_key))
+        smoke.results.append(check_site(context, cdp_url, display, smoke, site, notebook, has_key))
         write(smoke)
     smoke.status = "done"
     write(smoke)

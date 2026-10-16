@@ -242,7 +242,7 @@ class TestExternalHost:
         assert _ws_scheme(request) == "wss"
 
 
-class TestHandlerURLRewriting:
+class TestJsonHandlers:
     """Verify handlers rewrite CDP WebSocket URLs to the public cdp-server endpoint."""
 
     class _Request:
@@ -280,7 +280,7 @@ class TestHandlerURLRewriting:
             return None
 
         def get(self, *_args, **_kwargs):
-            return TestHandlerURLRewriting._FakeResponse(self._data)
+            return TestJsonHandlers._FakeResponse(self._data)
 
     def _patch_session(self, monkeypatch, data):
         monkeypatch.setattr(
@@ -881,11 +881,13 @@ class TestXdotoolCommands:
         assert 0.05 <= steps[1][0] <= 0.12
 
     def test_pointer_location_is_in_viewport_css_pixels(self):
-        async def fake_xdotool(argv):
-            assert argv == ["getmouselocation", "--shell"]
+        browser = SimpleNamespace(display=_mod.Display(100, []))
+
+        async def fake_xdotool(argv, cp):
+            assert argv == ["getmouselocation", "--shell"] and cp is browser
             return "X=1300\nY=844\nSCREEN=0\nWINDOW=123\n"
         with patch.object(_mod, "_run_xdotool", fake_xdotool):
-            assert asyncio.run(_mod.pointer_location((0, 244), 2.0)) == [650.0, 300.0]
+            assert asyncio.run(_mod.pointer_location((0, 244), 2.0, browser)) == [650.0, 300.0]
 
     def test_unknown_action_fails(self):
         with pytest.raises(ValueError):
@@ -940,3 +942,105 @@ class TestHistory:
     @pytest.mark.parametrize("host", ["127.0.0.1:9222", "localhost:9222", "[::1]:9222"])
     def test_loopback_hosts_are_allowed(self, host):
         assert _mod._host_is_loopback(host)
+
+
+# ---------------------------------------------------------------------------
+# Session browsers: one per Stealthbox session, each on its own display
+# ---------------------------------------------------------------------------
+
+
+class TestSessionBrowsers:
+    def _pool(self, tmp_path):
+        return ChromePool(binary="/fake/chrome", global_args=[], headless=False, data_dir=str(tmp_path))
+
+    @staticmethod
+    def _process(port, display=None):
+        return SimpleNamespace(process=SimpleNamespace(poll=lambda: None), cdp_port=port, display=display)
+
+    def test_session_json_routes_its_websockets_through_the_session(self, monkeypatch, tmp_path):
+        TestJsonHandlers()._patch_session(monkeypatch, {
+            "webSocketDebuggerUrl": "ws://127.0.0.1:5101/devtools/browser/browser-guid",
+        })
+        pool = self._pool(tmp_path)
+        pool._processes["s_one-ab12"] = self._process(5101)
+        request = SimpleNamespace(headers={"Host": "127.0.0.1:9222"}, scheme="http",
+                                  app={"port": 9222, "pool": pool},
+                                  match_info={"key": "s_one-ab12", "endpoint": "version"})
+
+        payload = json.loads(asyncio.run(_mod.handle_session_json(request)).text)
+
+        assert payload["webSocketDebuggerUrl"] == "ws://127.0.0.1:9222/sessions/s_one-ab12/devtools/browser/browser-guid"
+
+    def test_a_session_that_is_not_open_is_not_found(self, tmp_path):
+        request = SimpleNamespace(app={"pool": self._pool(tmp_path)}, match_info={"key": "s_gone"})
+        with pytest.raises(aiohttp.web.HTTPNotFound):
+            _mod._session_process(request)
+
+    @pytest.mark.parametrize("key", ["12345", "__default__", "s_../x", "s_"])
+    def test_only_session_keys_close_through_the_session_route(self, key, tmp_path):
+        request = SimpleNamespace(app={"pool": self._pool(tmp_path)}, match_info={"key": key})
+        assert asyncio.run(_mod.handle_session_close(request)).status == 400
+
+    def test_a_new_session_takes_the_lowest_free_display(self, tmp_path):
+        pool = self._pool(tmp_path)
+        pool._processes["s_a"] = self._process(5101, _mod.Display(100, []))
+        pool._processes["s_b"] = self._process(5102, _mod.Display(102, []))
+        pool._processes["12345"] = self._process(5103)
+        assert pool._free_display() == 101
+
+    def test_a_display_has_its_own_vnc_port(self):
+        assert _mod.Display(99, []).vnc_port == 5900
+        assert _mod.Display(101, []).vnc_port == 5902
+
+    def test_the_profile_copy_leaves_out_caches_open_tabs_and_locks(self, tmp_path):
+        source = tmp_path / "default"
+        for name in ["Default/Cookies", "Default/Local Storage/leveldb/000003.log", "Default/Cache/Cache_Data/index",
+                     "Default/Code Cache/js/index", "Default/Sessions/Session_1", "SingletonLock",
+                     "Default/Service Worker/CacheStorage/x", "Default/Service Worker/Database/y", ".cdp-server-seed"]:
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).write_text("x")
+        copy = tmp_path / "s_copy"
+
+        _mod.shutil.copytree(source, copy, symlinks=True, ignore=_mod.PROFILE_COPY_SKIPS)
+
+        kept = {str(path.relative_to(copy)) for path in copy.rglob("*") if path.is_file()}
+        assert kept == {"Default/Cookies", "Default/Local Storage/leveldb/000003.log",
+                        "Default/Service Worker/Database/y", ".cdp-server-seed"}
+
+    def test_input_finds_the_browser_that_has_the_tab(self, monkeypatch, tmp_path):
+        tabs = {5100: [{"id": "AAAA1111"}], 5101: [{"id": "BBBB2222"}]}
+
+        class Response:
+            def __init__(self, port):
+                self.port = port
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return None
+
+            async def json(self):
+                return tabs[self.port]
+
+        class Session:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return None
+
+            def get(self, url):
+                return Response(int(url.split(":")[2].split("/")[0]))
+
+        monkeypatch.setattr(_mod.aiohttp, "ClientSession", Session)
+        pool = self._pool(tmp_path)
+        main, session = self._process(5100), self._process(5101, _mod.Display(100, []))
+        pool._processes.update({"__default__": main, "s_one": session})
+
+        assert asyncio.run(pool.process_for_target("BBBB2222")) is session
+        with pytest.raises(aiohttp.web.HTTPNotFound):
+            asyncio.run(pool.process_for_target("CCCC3333"))

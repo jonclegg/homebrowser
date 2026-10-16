@@ -259,9 +259,12 @@ def site_of(url):
 
 # ------------------------------------------------------------------ the browser
 
-def _browser_socket():
+# Each function here takes the CDP URL of the browser it works on (and its X display,
+# for those that look at the screen): the main browser, or a session's own.
+
+def _browser_socket(cdp_url):
     """A browser-level CDP connection of our own, beside Playwright's."""
-    with urllib.request.urlopen(f"{humanize.CDP_URL}/json/version", timeout=10) as response:
+    with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=10) as response:
         url = json.load(response)["webSocketDebuggerUrl"]
     return websocket_connect(url, max_size=None, open_timeout=10)
 
@@ -295,13 +298,13 @@ def page_url(page):
         session.detach()
 
 
-def page_targets():
+def page_targets(cdp_url):
     """The open tabs, as Chrome lists them (most recently active first within a window)."""
-    with urllib.request.urlopen(f"{humanize.CDP_URL}/json/list", timeout=5) as response:
+    with urllib.request.urlopen(f"{cdp_url}/json/list", timeout=5) as response:
         return [target for target in json.load(response) if target["type"] == "page"]
 
 
-def front_tab():
+def front_tab(cdp_url, display):
     """The tab in front, as {"id", "url", "title"}, or None with no tab open.
 
     Chrome lists page targets most recently active first, which is right within one
@@ -311,11 +314,11 @@ def front_tab():
     breaks ties. A page with no title (Chrome names the window after its address)
     matches no title, and then the order alone decides.
     """
-    tabs = page_targets()
+    tabs = page_targets(cdp_url)
     if not tabs:
         return None
-    window = subprocess.run(["xdotool", "getactivewindow", "getwindowname"],
-                            capture_output=True, text=True, timeout=5).stdout.strip()
+    window = subprocess.run(["xdotool", "getactivewindow", "getwindowname"], capture_output=True, text=True,
+                            timeout=5, env={**os.environ, "DISPLAY": display}).stdout.strip()
     title = window.rsplit(" - ", 1)[0]
     tab = next((tab for tab in tabs if tab["title"] == title), tabs[0])
     return {"id": tab["id"], "url": tab["url"], "title": tab["title"]}
@@ -331,9 +334,9 @@ def history_suggestions(text):
         return json.load(response)["suggestions"]
 
 
-def display_thumbnail(width):
+def display_thumbnail(display, width):
     """A JPEG of the whole X display, what the live view shows, `width` pixels wide."""
-    with mss.mss() as screen:
+    with mss.MSS(display=display) as screen:
         shot = screen.grab(screen.monitors[1])
     image = Image.frombytes("RGB", shot.size, shot.rgb)
     image.thumbnail((width, width))
@@ -353,36 +356,36 @@ def typed_url(text):
     return "https://www.bing.com/search?q=" + quote_plus(text)
 
 
-def navigate_tab(target_id, url):
+def navigate_tab(cdp_url, target_id, url):
     """Load `url` in a tab, as typed in its address bar, and bring the tab to the front."""
-    with _browser_socket() as socket:
+    with _browser_socket(cdp_url) as socket:
         session = _command(socket, 1, "Target.attachToTarget", {"targetId": target_id, "flatten": True})["sessionId"]
         _command(socket, 2, "Page.navigate", {"url": url, "transitionType": "typed"}, session, 30)
         _command(socket, 3, "Target.activateTarget", {"targetId": target_id})
         _command(socket, 4, "Target.detachFromTarget", {"sessionId": session})
 
 
-def activate_tab(target_id):
+def activate_tab(cdp_url, target_id):
     """Bring a tab to the front from the browser side, without Playwright: the
-    server's browser thread is busy while a run holds for the user."""
-    with _browser_socket() as socket:
+    browser's worker thread is busy while a run holds for the user."""
+    with _browser_socket(cdp_url) as socket:
         _command(socket, 1, "Target.activateTarget", {"targetId": target_id})
 
 
-def open_tab(background):
-    """Open a blank tab from the browser side, without Playwright: the server's browser
+def open_tab(cdp_url, background):
+    """Open a blank tab from the browser side, without Playwright: the browser's worker
     thread may be busy with a run. In the background it leaves the run's tab in front."""
-    with _browser_socket() as socket:
+    with _browser_socket(cdp_url) as socket:
         return _command(socket, 1, "Target.createTarget", {"url": "about:blank", "background": background})["targetId"]
 
 
-def close_target(target_id):
+def close_target(cdp_url, target_id):
     """Close a tab from the browser side, which works even when its renderer is hung."""
-    with _browser_socket() as socket:
+    with _browser_socket(cdp_url) as socket:
         _command(socket, 1, "Target.closeTarget", {"targetId": target_id})
 
 
-def close_unresponsive_tabs():
+def close_unresponsive_tabs(cdp_url):
     """Close every tab that would stall a connect, and return their URLs.
 
     Playwright's connect sets up every page as it attaches, and waits on each.
@@ -392,7 +395,7 @@ def close_unresponsive_tabs():
     after another site did the same to another shard).
     """
     closed = []
-    with _browser_socket() as socket:
+    with _browser_socket(cdp_url) as socket:
         targets = _command(socket, 1, "Target.getTargets")["targetInfos"]
         unborn = {target["targetId"] for target in targets if target["type"] == "page" and not target["url"]}
         if unborn:
@@ -430,6 +433,29 @@ def close_unresponsive_tabs():
             message_id += 1
             going &= {target["targetId"] for target in _command(socket, message_id, "Target.getTargets")["targetInfos"]}
     return [target["url"] for target in closed]
+
+
+# Fields of a cookie (CDP Network.Cookie) that Storage.setCookies takes back.
+COOKIE_FIELDS = ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite", "expires", "priority",
+                 "sourceScheme", "sourcePort", "partitionKey")
+
+
+def browser_cookies(cdp_url):
+    """Every cookie the browser holds, as CDP lists them."""
+    with _browser_socket(cdp_url) as socket:
+        return _command(socket, 1, "Storage.getCookies", timeout=30)["cookies"]
+
+
+def set_cookies(cdp_url, cookies):
+    """Add or replace cookies in a browser. A session cookie (no expiry) stays one."""
+    params = []
+    for cookie in cookies:
+        param = {field: cookie[field] for field in COOKIE_FIELDS if field in cookie}
+        if cookie.get("session"):
+            param.pop("expires", None)
+        params.append(param)
+    with _browser_socket(cdp_url) as socket:
+        _command(socket, 1, "Storage.setCookies", {"cookies": params}, timeout=30)
 
 
 class Watchdog:
@@ -481,7 +507,7 @@ class Watchdog:
                     self.target = None
             if target:
                 try:
-                    close_target(target)
+                    close_target(self.turn.cdp_url, target)
                 except Exception as exc:  # noqa: BLE001 - the watchdog thread must outlive one failure
                     self.turn.repairs.append(f"step {len(self.turn.steps)}: the tab stopped responding "
                                              f"for {self.seconds}s and could not be closed: {exc}")
@@ -590,7 +616,7 @@ def dom_hints(page, limit=40):
 WINDOW_FRAME_BORDER = 4
 
 
-def safe_screenshot(page, path):
+def safe_screenshot(page, path, display):
     """The page's viewport as the screen shows it, at CSS scale. False if it failed.
 
     Taken from the X display, not with CDP: input is real X11 events, so the model
@@ -617,7 +643,7 @@ def safe_screenshot(page, path):
     left = round((bounds["left"] + border) * scale)
     top = round((bounds["top"] + bounds["height"] - border) * scale - device["clientHeight"])
     try:
-        with mss.MSS() as screen:
+        with mss.MSS(display=display) as screen:
             raw = screen.grab({"left": left, "top": top,
                                "width": round(device["clientWidth"]), "height": round(device["clientHeight"])})
     except mss.exception.ScreenShotError:  # the region is off the X screen; the caller retries
@@ -1179,9 +1205,13 @@ def usable_page(page, turn):
 class Turn:
     """One caller message being worked: its steps, notes, files and cost."""
 
-    def __init__(self, run_id, context, message, conversation, notebook, run_dir, max_stuck_steps, model):
+    def __init__(self, run_id, context, cdp_url, display, message, conversation, notebook, run_dir,
+                 max_stuck_steps, model):
         self.run_id = run_id
         self.context = context
+        # The browser the turn works in: its CDP URL, and the X display it draws on.
+        self.cdp_url = cdp_url
+        self.display = display
         self.message = message
         self.conversation = conversation
         self.notebook = notebook
@@ -1282,7 +1312,7 @@ def _run_steps(page, turn, on_step, on_phase):
         on_phase("looking", "Looking at the page", None)
         shot = os.path.join(turn.shots_dir, f"step-{step:02d}.png")
         started = time.time()
-        if not safe_screenshot(page, shot):
+        if not safe_screenshot(page, shot, turn.display):
             # A challenge that is mid-navigation destroys the page context. A
             # press-and-hold overlay in particular can navigate as it arms, and a
             # single retry is not enough: aborting here meant the hold never ran
@@ -1291,7 +1321,7 @@ def _run_steps(page, turn, on_step, on_phase):
                 if page.is_closed():
                     break
                 humanize.pause(wait, wait + 1.5)
-                if safe_screenshot(page, shot):
+                if safe_screenshot(page, shot, turn.display):
                     break
             else:
                 return "failed", "I could not take a screenshot of the page.", page

@@ -16,11 +16,11 @@
     POST /v1/runs/{run}/pause        hold the run after its current step and bring its tab to the front, so the user can drive
     POST /v1/runs/{run}/resume
     GET  /v1/sessions                every session: status, latest screenshot, the conversation
-    POST /v1/sessions                a blank session: a new tab in front, no task; message it later
+    POST /v1/sessions                a blank session: a browser of its own, no task; message it later
     GET  /v1/sessions/{session}
     POST /v1/sessions/{session}/focus  bring its tab to the front, so the live view shows it
-    GET  /v1/browser/screenshot      a JPEG of the live browser, for the console's preview;
-                                     ?width= up to 1920 (default 320)
+    GET  /v1/browser/screenshot      a JPEG of the main browser's display, for the console's preview;
+                                     ?width= up to 1920 (default 320), ?session= that session's browser
     GET  /v1/browser/history?q=      addresses from the browser's history, for the address bar
     POST /v1/browser/close           {"tab": id}: close a tab (the console's Browser entry); a
                                      session's tab closes its session
@@ -51,9 +51,11 @@
 Every route but /v1/health needs `Authorization: Bearer <token>`; the token is
 <data>/api-token, created on first start. The console instead carries a device
 cookie, which signing in with the console password gives out (console_auth). A
-session is one browser tab and the
-conversation in it. One browser has one mouse, so runs go through a single worker
-thread, which is also the only thread that touches Playwright.
+session is a browser tab and the conversation in it. A browser has one mouse, so
+each session works in a browser of its own (cdp-server starts one per session, on
+its own X display), and sessions run at the same time. A tab a caller lends is in
+the main browser, the one other CDP clients share. Each browser's runs go through
+its own worker thread, the only thread that touches that browser's Playwright.
 
 Every state change (a run queued, started, stepped or finished; a session created
 or expired; the browser connecting; a share; a smoke test; the key setup) is
@@ -82,6 +84,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.error
 import urllib.request
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -106,6 +109,21 @@ PORT = int(os.environ.get("STEALTHBOX_API_LISTEN_PORT", "8423"))
 HOST_PORT = os.environ.get("STEALTHBOX_API_HOST_PORT") or str(PORT)
 CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:9222")
 VIEWER_PORT = 6080
+# websockify for the session browsers' displays, each under its browser's key (cdp-server
+# writes the tokens); internal to the container, reached through /viewer/sessions/<key>/.
+SESSION_VIEWER_PORT = 6081
+MAIN = "main"
+MAIN_DISPLAY = os.environ.get("DISPLAY", ":99")
+# Session browsers open at once; each session works in one of its own. At the limit,
+# the least recently used finished session gives its browser to a new one.
+SESSION_BROWSERS = int(os.environ.get("STEALTHBOX_SESSION_BROWSERS", "3"))
+# Copying the profile and starting Chrome on a new display: seconds on a fast machine.
+SESSION_BROWSER_START_SECONDS = 180
+EXPIRY_CHECK_SECONDS = 60
+# How often an idle session browser's worker checks that its Chrome is still running.
+QUIT_CHECK_SECONDS = 3
+# Put in a browser's queue to close it after the work ahead of it.
+CLOSE = object()
 CONSOLE_PAGE = os.path.join(HERE, "console.html")
 CONSOLE_COOKIE = "stealthbox_console"
 PASSWORD_FILE = os.path.join(DATA_DIR, "console-password")
@@ -239,13 +257,19 @@ class Share:
 
 
 class Session:
-    def __init__(self, tab=None):
+    def __init__(self, tab=None, browser=None):
         self.id = new_id("s")
         self.page = None
         self.target_id = tab
-        # A tab the caller already had open (its own scraper tab, say): the run works
-        # in it, and closing or expiring the session leaves it open.
+        # A tab the caller already had open in the main browser (its own scraper tab,
+        # say): the run works in it, and closing or expiring the session leaves it open.
         self.borrowed = tab is not None
+        # The browser it works in: the main one for a borrowed tab, otherwise one of its
+        # own, which an idle session gives up to a newer one (Stealthbox._give_browser)
+        # and gets back, new, with its next message.
+        self.browser = browser
+        # Work for a browser it does not have yet (runs, a blank session's first tab), in order.
+        self.pending = []
         self.url = None
         self.conversation = []
         self.runs = []
@@ -272,7 +296,9 @@ class Session:
             return "stopped"
         return "done"
 
-    def view(self, share, front_tab):
+    def view(self, share, front_tab, waiting_for_browser):
+        """`front_tab` is the tab in front in the session's browser; `waiting_for_browser`
+        says it waits for a browser to free up."""
         last = self.runs[-1] if self.runs else None
         shot = None
         for run in reversed(self.runs):
@@ -295,6 +321,8 @@ class Session:
                           for step in view.get("trace", [])],
             })
         state = self.state()
+        browser = self.browser
+        in_front = bool(front_tab and self.target_id == front_tab["id"])
         return {
             "session": self.id,
             "state": state,
@@ -302,7 +330,21 @@ class Session:
             "url": self.url,
             "tab": self.target_id,
             "shot_url": shot,
-            "in_front": bool(front_tab and self.target_id == front_tab["id"]),
+            "in_front": in_front,
+            # The address its tab is on now (the user may have browsed since the run).
+            "live_url": front_tab["url"] if in_front else None,
+            # Where its live view and preview come from: the main browser (a borrowed
+            # tab), its own browser, or none right now (it gets one with its next message).
+            "browser": None if browser is None else {
+                "kind": "main" if browser.main else "own",
+                "open": browser.ready,
+                # Not open and not opening: its Chrome quit (its last tab closed); the
+                # session's next message opens it again.
+                "opening": browser.opening,
+                "viewer": browser.viewer,
+                "preview": "/v1/browser/screenshot" + ("" if browser.main else f"?session={self.id}"),
+            },
+            "waiting_for_browser": waiting_for_browser,
             "archived": self.archived,
             "task": last.reply if state == "needs" else None,
             "needs_user": last.needs_user if state == "needs" else None,
@@ -384,8 +426,180 @@ class Run:
         os.replace(tmp, os.path.join(self.dir, "run.json"))
 
 
+def cdp_server(path):
+    """POST to cdp-server, which starts and stops the browsers, beside CDP on the same port."""
+    request = urllib.request.Request(f"{CDP_URL}{path}", data=b"{}", headers={"Content-Type": "application/json"},
+                                     method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=SESSION_BROWSER_START_SECONDS) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"cdp-server {path} failed ({error.code}): {error.read().decode()[:300]}") from None
+
+
+def cookie_key(cookie):
+    return cookie["name"], cookie["domain"], cookie["path"]
+
+
+class Browser:
+    """One Chrome, the X display it draws on, and the worker thread that drives it.
+
+    The main browser is the saved profile on the main display, shared with other CDP
+    clients: a run in a tab a caller lends, smoke tests and setup pages work there.
+    Every other session gets a browser of its own from cdp-server, so sessions work
+    at the same time, each with its own mouse, keyboard and live view. A session's
+    browser starts from a copy of the main profile; the cookies it sets go back to
+    the main browser after each run and when it closes.
+    """
+
+    def __init__(self, stealthbox, key):
+        self.stealthbox = stealthbox
+        self.key = key
+        self.main = key == MAIN
+        self.cdp_url = CDP_URL if self.main else f"{CDP_URL}/sessions/{key}"
+        # A session browser's display is known once cdp-server has opened it.
+        self.display = MAIN_DISPLAY if self.main else None
+        self.viewer = "/viewer/websockify" if self.main else f"/viewer/sessions/{key}/websockify"
+        self.queue = queue.Queue()
+        self.connection = None
+        self.current = None
+        # Live views connected to it (the console's): a browser someone watches is not closed.
+        self.viewers = 0
+        self.opening = not self.main
+        self.closing = False
+        # A session browser's cookies as last copied to the main browser, by cookie_key.
+        self.cookies = {}
+        self.thread = threading.Thread(target=self.work, name=f"browser-{key}", daemon=True)
+
+    @property
+    def ready(self):
+        return self.connection is not None and self.connection.is_connected()
+
+    def close(self):
+        """Close a session's browser once its worker is free: copy its cookies, then stop it."""
+        self.closing = True
+        self.queue.put(CLOSE)
+
+    def front_tab(self):
+        """The tab its live view shows, or None while the browser is not up."""
+        if not self.ready or self.display is None:
+            return None
+        try:
+            return agent.front_tab(self.cdp_url, self.display)
+        except (OSError, subprocess.SubprocessError):
+            # The browser or the display went away since the check above.
+            return None
+
+    def work(self):
+        playwright = sync_playwright().start()
+        if self.main:
+            # Connect now, not on the first message: cdp-server launches Chrome on its
+            # first connection, which can take minutes on a cold start. It also starts
+            # after this server, so keep trying for a while; after that a run retries.
+            deadline = time.time() + BROWSER_START_SECONDS
+            while True:
+                try:
+                    self.connect(playwright)
+                    break
+                except (PlaywrightError, OSError, WebSocketException) as exc:
+                    if time.time() > deadline:
+                        print(f"browser not reachable, the first run will retry: {exc}", file=sys.stderr, flush=True)
+                        break
+                    time.sleep(2)
+        else:
+            try:
+                self.connect(playwright)
+            except Exception:  # noqa: BLE001 - its first run tries again, and says why if it fails
+                traceback.print_exc()
+        try:
+            while True:
+                try:
+                    item = self.queue.get(timeout=QUIT_CHECK_SECONDS)
+                except queue.Empty:
+                    self._notice_quit()
+                    continue
+                if item is CLOSE:
+                    return
+                self.stealthbox.work_on(self, playwright, item)
+        finally:
+            self._shut(playwright)
+
+    def _notice_quit(self):
+        """A session's Chrome quits with its last tab. Playwright on this thread hears of it
+        only on its next call, so ask cdp-server, and let the console say it closed."""
+        if self.main or self.connection is None:
+            return
+        try:
+            urllib.request.urlopen(f"{self.cdp_url}/json/version", timeout=5).close()
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                self.connection = None
+                self.stealthbox.events.publish("browser.closed", browser=self.key)
+        except OSError:
+            # cdp-server busy or restarting: ask again next time.
+            pass
+
+    def connect(self, playwright):
+        """The browser's context: a session's browser is opened first, and either is
+        connected again if the connection dropped (Chrome restarted, say)."""
+        if not self.ready:
+            self.opening = True
+            try:
+                return self._connect(playwright)
+            finally:
+                self.opening = False
+        return self.connection.contexts[0]
+
+    def _connect(self, playwright):
+        """Open (a session's) and connect; under connect(), which marks it opening."""
+        reconnect = self.connection is not None
+        if not self.main:
+            # Opens it, or finds it running; one whose Chrome quit (its last tab
+            # closed) starts again from a fresh copy of the main profile.
+            self.display = cdp_server(f"/sessions/{self.key}/open")["display"]
+        closed = agent.close_unresponsive_tabs(self.cdp_url)
+        if closed:
+            self.stealthbox.events.publish("browser.hung_tabs_closed", browser=self.key, urls=closed)
+        self.connection = playwright.chromium.connect_over_cdp(self.cdp_url)
+        if not self.main:
+            self.cookies = {cookie_key(cookie): cookie for cookie in agent.browser_cookies(self.cdp_url)}
+        self.stealthbox.events.publish("browser.connected", browser=self.key, reconnect=reconnect)
+        # Pages from an old connection are dead.
+        for session in self.stealthbox.sessions_in(self):
+            if session.page is not None:
+                self.stealthbox.events.publish("session.tab_lost", session=session.id)
+            session.page = None
+        return self.connection.contexts[0]
+
+    def save_cookies(self):
+        """Copy the cookies this session's browser set or changed since the last copy to
+        the main browser, so a sign-in made in a session lasts. Ones it deleted stay there."""
+        cookies = agent.browser_cookies(self.cdp_url)
+        changed = [cookie for cookie in cookies if self.cookies.get(cookie_key(cookie)) != cookie]
+        if changed:
+            agent.set_cookies(CDP_URL, changed)
+            self.stealthbox.events.publish("browser.cookies_saved", browser=self.key, cookies=len(changed))
+        self.cookies = {cookie_key(cookie): cookie for cookie in cookies}
+
+    def _shut(self, playwright):
+        try:
+            if not self.main and self.ready:
+                self.save_cookies()
+        except Exception:  # noqa: BLE001 - a browser that is closing still has to close
+            traceback.print_exc()
+        finally:
+            if not self.main:
+                try:
+                    cdp_server(f"/sessions/{self.key}/close")
+                except (OSError, RuntimeError):
+                    # cdp-server closes a browser nobody is connected to after its idle timeout.
+                    traceback.print_exc()
+            playwright.stop()
+            self.stealthbox.browser_closed(self)
+
+
 class Stealthbox:
-    """Sessions, the run queue, and the worker that drives the browser."""
+    """Sessions, the browsers they work in, and the runs waiting for a browser."""
 
     def __init__(self):
         self.events = Events()
@@ -393,15 +607,22 @@ class Stealthbox:
         self.notebook = Notebook(DATA_DIR)
         self.sessions = {}
         self.runs = {}
-        self.queue = queue.Queue()
         self.lock = threading.Lock()
-        self.browser = None
-        self.current = None
+        self.main = Browser(self, MAIN)
+        # Session browsers open, opening or closing, by key: each counts against
+        # SESSION_BROWSERS until it has closed.
+        self.browsers = {}
+        # Sessions with work and no browser, waiting for one, oldest first.
+        self.waiting = []
         self.smokes = {}
         self.setup_codes = key_setup.SetupCodes()
         self.password_codes = key_setup.SetupCodes()
         self.password = console_auth.Password(PASSWORD_FILE)
         self.devices = console_auth.Devices(DEVICES_FILE)
+
+    def start(self):
+        self.main.thread.start()
+        threading.Thread(target=self._expire_sessions, name="session-expiry", daemon=True).start()
 
     # ---- called from HTTP threads
 
@@ -419,7 +640,8 @@ class Stealthbox:
                 if session.archived:
                     self._archive(session, False)
             else:
-                session = Session(tab)
+                # A borrowed tab is the main browser's; any other session gets its own.
+                session = Session(tab, self.main if tab else None)
                 self.sessions[session.id] = session
                 self.events.publish("session.created", session=session.id)
             session.last_used = time.time()
@@ -427,11 +649,14 @@ class Stealthbox:
             run = Run(session, message, max_stuck_steps)
             session.runs.append(run)
             self.runs[run.id] = run
-            # Published before the worker can see the run, so `run.queued` always
+            # Published before a worker can see the run, so `run.queued` always
             # comes before that run's `run.started`.
             self.events.publish("run.queued", run=run.id, session=session.id, message=message,
                                 max_stuck_steps=max_stuck_steps)
-        self.queue.put(run)
+            if session.browser is None:
+                self._wait_for_browser(session, run)
+            else:
+                session.browser.queue.put(run)
         return run
 
     def cancel(self, run):
@@ -439,6 +664,17 @@ class Stealthbox:
         if run.turn is not None:
             run.turn.cancelled = True
         self.events.publish("run.cancel_requested", run=run.id, session=run.session.id)
+        session = run.session
+        with self.lock:
+            if run not in session.pending:
+                return
+            # Waiting for a browser: it ends here, with no browser opened for it.
+            session.pending.remove(run)
+            if not session.pending and session in self.waiting:
+                self.waiting.remove(session)
+        run.status = "cancelled"
+        run.reply = "Cancelled before it started."
+        self._finished(run)
 
     def pause(self, run, paused):
         """Hold a running run after its current step (the user takes over), or let it go on."""
@@ -446,7 +682,7 @@ class Stealthbox:
             raise RuntimeError(f"run {run.id} is {run.status}; only a running run can pause")
         if paused:
             # The user takes over in the live view, which shows the tab in front.
-            agent.activate_tab(run.session.target_id)
+            agent.activate_tab(run.session.browser.cdp_url, run.session.target_id)
         run.paused = paused
         run.turn.paused = paused
         self.events.publish("run.paused" if paused else "run.resumed", run=run.id, session=run.session.id)
@@ -456,6 +692,9 @@ class Stealthbox:
         with self.lock:
             return list(self.sessions.values())
 
+    def sessions_in(self, browser):
+        return [session for session in self._sessions() if session.browser is browser]
+
     def session(self, session_id):
         with self.lock:
             session = self.sessions.get(session_id)
@@ -463,55 +702,70 @@ class Stealthbox:
             raise LookupError(f"no session {session_id} (it may have expired or been closed)")
         return session
 
+    def browser(self, key):
+        """A session browser by its key (for its live view)."""
+        with self.lock:
+            browser = self.browsers.get(key)
+        if browser is None:
+            raise LookupError(f"no browser {key} (its session may have closed)")
+        return browser
+
     def sessions_view(self):
         with self.lock:
             sessions = sorted(self.sessions.values(), key=lambda s: s.last_used, reverse=True)
-        front_tab = self.front_tab()
-        return [session.view(self.share, front_tab) for session in sessions]
+            waiting = set(self.waiting)
+        fronts = {}
+        for session in sessions:
+            if session.browser is not None and session.browser.key not in fronts:
+                fronts[session.browser.key] = session.browser.front_tab()
+        return [session.view(self.share, fronts.get(session.browser.key) if session.browser else None,
+                             session in waiting)
+                for session in sessions]
 
-    def front_tab(self):
-        """The tab the live view shows, or None while the browser is not up."""
-        if not (self.browser and self.browser.is_connected()):
-            return None
-        try:
-            return agent.front_tab()
-        except (OSError, subprocess.SubprocessError):
-            # The browser or the display went away since the check above.
-            return None
+    def session_view(self, session):
+        with self.lock:
+            waiting = session in self.waiting
+        return session.view(self.share, session.browser.front_tab() if session.browser else None, waiting)
 
     def navigate(self, text, session):
-        """Load what the user typed in the console's address bar. Not in a tab a run
-        is driving: the run would work on a page it did not choose."""
+        """Load what the user typed in the console's address bar: in the session's tab, or
+        with no session in the main browser's tab in front. Not in a tab a run is driving:
+        the run would work on a page it did not choose."""
         if session is None:
-            tab = self.front_tab()
+            browser = self.main
+            tab = browser.front_tab()
             if tab is None:
                 raise LookupError("no tab is open")
             target = tab["id"]
             with self.lock:
-                session = next((s for s in self.sessions.values() if s.target_id == target), None)
+                session = next((s for s in self.sessions.values()
+                                if s.browser is browser and s.target_id == target), None)
         else:
-            target = session.target_id
-            if target is None:
+            browser, target = session.browser, session.target_id
+            if browser is None or target is None:
                 raise LookupError(f"session {session.id} has no tab yet")
         if session is not None and session.state() in ("working", "waiting"):
             raise RuntimeError("Stealthbox is working in this tab; stop or pause the run first")
         url = agent.typed_url(text)
-        agent.navigate_tab(target, url)
+        agent.navigate_tab(browser.cdp_url, target, url)
         if session is not None:
             session.url = url
             session.last_used = time.time()
-        self.events.publish("browser.navigated", tab=target, url=url)
+        self.events.publish("browser.navigated", browser=browser.key, tab=target, url=url)
         return url
 
     def focus(self, session):
-        """Bring the session's tab to the front, after the run in progress if there is one.
-        A paused run holds the browser thread until the user hands back, so its tab
-        comes to the front at once."""
+        """Bring the session's tab to the front of its browser, after the run in progress if
+        there is one. A paused run holds the browser's thread until the user hands back, so
+        its tab comes to the front at once."""
         session.last_used = time.time()
-        if session.target_id and session.target_id not in {tab["id"] for tab in agent.page_targets()}:
+        browser = session.browser
+        if browser is None or not browser.ready:
+            raise LookupError(f"session {session.id} has no browser open; message it to get one")
+        if session.target_id and session.target_id not in {tab["id"] for tab in agent.page_targets(browser.cdp_url)}:
             raise LookupError(f"session {session.id}'s tab was closed")
         if session.state() == "paused":
-            agent.activate_tab(session.target_id)
+            agent.activate_tab(browser.cdp_url, session.target_id)
             self.events.publish("session.focused", session=session.id)
             return
         def chore(context):
@@ -521,11 +775,11 @@ class Stealthbox:
                 return
             page.bring_to_front()
             self.events.publish("session.focused", session=session.id)
-        self.queue.put(chore)
+        browser.queue.put(chore)
 
     @staticmethod
     def _session_page(context, session):
-        """On the browser thread: the session's open page. After the browser reconnects
+        """On the browser's thread: the session's open page. After the browser reconnects
         the old page object is dead, so find its tab again by target id."""
         if session.page is None or session.page.is_closed():
             session.page = next((page for page in context.pages
@@ -533,25 +787,23 @@ class Stealthbox:
         return session.page
 
     def open_blank(self):
-        """A session with no task yet, for the user to browse or message later. Its tab
-        opens at once; while a run has the mouse it waits behind that run's tab, and
-        comes to the front when the browser thread is free."""
+        """A session with no task yet, for the user to browse or message later, in a browser
+        of its own (once one is free): the tab it opens with is the session's."""
         session = Session()
-        session.target_id = agent.open_tab(background=self.current is not None)
-        with self.lock:
-            self.sessions[session.id] = session
-        self.events.publish("session.created", session=session.id)
-        self.events.publish("session.tab_opened", session=session.id, tab=session.target_id)
 
         def chore(context):
             if session.id not in self.sessions:
-                # Closed before the worker got to it.
+                # Closed before its browser opened.
                 return
-            # A tab opened outside Playwright reaches it a moment later.
-            session.page = self._borrowed_page(context, session.target_id)
+            session.page = context.pages[0] if context.pages else context.new_page()
+            session.target_id = agent.humanize.target_id(session.page)
             session.page.bring_to_front()
+            self.events.publish("session.tab_opened", session=session.id, tab=session.target_id)
             self.events.publish("session.focused", session=session.id)
-        self.queue.put(chore)
+        with self.lock:
+            self.sessions[session.id] = session
+            self.events.publish("session.created", session=session.id)
+            self._wait_for_browser(session, chore)
         return session
 
     def archive(self, session, archived):
@@ -567,38 +819,35 @@ class Stealthbox:
         self.events.publish("session.archived" if archived else "session.unarchived", session=session.id)
 
     def close(self, session):
+        """Forget the session. Its own browser closes (its cookies kept); a borrowed tab stays open."""
         with self.lock:
             if session.busy:
                 raise RuntimeError(f"session {session.id} is still working; stop its run first")
             # Two consoles can close it at once; the second finds it gone.
             if self.sessions.pop(session.id, None) is None:
                 raise LookupError(f"no session {session.id} (it was closed)")
-
-        def chore(context):
-            page = None if session.borrowed else self._session_page(context, session)
-            if page is not None:
-                page.close()
-        self.queue.put(chore)
+            self._forget(session)
         self.events.publish("session.closed", session=session.id)
 
     def close_tab(self, target):
-        """Close a tab from the console's Browser entry, which stands for a tab no listed
-        session shows: another program's, one opened by hand, or an archived session's
-        (closed with it). Chrome quits with its last tab, so a blank one takes its place
-        first. Under the lock, so two consoles cannot both close the last two tabs."""
+        """Close a main-browser tab from the console's Browser entry, which stands for a tab
+        no listed session shows: another program's, one opened by hand, or an archived
+        session's (closed with it). Chrome quits with its last tab, so a blank one takes its
+        place first. Under the lock, so two consoles cannot both close the last two tabs."""
+        browser = self.main
         with self.lock:
-            owner = next((s for s in self.sessions.values() if s.target_id == target), None)
+            owner = next((s for s in self.sessions.values() if s.browser is browser and s.target_id == target), None)
             if owner is not None and not owner.archived:
                 # The console's tab id is a refresh old; the user may have switched tabs since.
                 raise RuntimeError(f"that tab is session {owner.id}'s now; close it from its row")
             if owner is not None and owner.busy:
                 raise RuntimeError(f"session {owner.id} is still working in that tab; stop its run first")
-            tabs = agent.page_targets()
+            tabs = agent.page_targets(browser.cdp_url)
             if target not in {tab["id"] for tab in tabs}:
                 raise LookupError(f"no tab {target} (it may have closed already)")
             if len(tabs) == 1:
-                agent.open_tab(background=False)
-            agent.close_target(target)
+                agent.open_tab(browser.cdp_url, background=False)
+            agent.close_target(browser.cdp_url, target)
             if owner is not None:
                 del self.sessions[owner.id]
         if owner is not None:
@@ -610,18 +859,23 @@ class Stealthbox:
         with self.lock:
             self.smokes[job.id] = job
         self.events.publish("smoke.queued", smoke=job.id, sites=job.sites)
-        self.queue.put(job)
+        self.main.queue.put(job)
         return job
 
     def status(self):
+        with self.lock:
+            browsers = [self.main, *self.browsers.values()]
+            waiting = sum(len(session.pending) for session in self.waiting)
         return {
-            "browser_connected": bool(self.browser and self.browser.is_connected()),
+            "browser_connected": self.main.ready,
             "model": agent.DEFAULT_MODEL,
             "openrouter_key": self._has_key(),
             "key_setup": self.setup_codes.status(),
-            "queue_depth": self.queue.qsize(),
-            "running": self.current.id if self.current else None,
-            "front_tab": self.front_tab(),
+            "queue_depth": waiting + sum(browser.queue.qsize() for browser in browsers),
+            # Read once: a worker clears it when its run ends.
+            "running": [run.id for browser in browsers if (run := browser.current)],
+            "session_browsers": {"open": len(browsers) - 1, "limit": SESSION_BROWSERS},
+            "front_tab": self.main.front_tab(),
             "share_url": self.share.active_url(),
             "console_password": self.password.is_set(),
             "password_setup": self.password_codes.status(),
@@ -629,7 +883,8 @@ class Stealthbox:
             "event_readers": self.events.readers,
             "sessions": [
                 {"session": session.id, "turns": len(session.conversation) // 2,
-                 "idle_seconds": int(time.time() - session.last_used), "busy": session.busy}
+                 "idle_seconds": int(time.time() - session.last_used), "busy": session.busy,
+                 "browser": session.browser.key if session.browser else None}
                 for session in self._sessions()
             ],
         }
@@ -641,7 +896,7 @@ class Stealthbox:
         self.events.publish("key.issued", in_browser=in_browser)
         if in_browser:
             url = f"http://127.0.0.1:{PORT}/setup?code={code}&in_browser=1"
-            self.queue.put(lambda context: context.new_page().goto(url))
+            self.main.queue.put(lambda context: context.new_page().goto(url))
         else:
             url = f"http://127.0.0.1:{HOST_PORT}/setup?code={code}"
         return {"setup_url": url, "in_browser": in_browser, "openrouter_key": self._has_key(),
@@ -695,83 +950,150 @@ class Stealthbox:
         except RuntimeError:
             return False
 
-    # ---- the worker thread
+    # ---- the browsers' worker threads
 
-    def work(self):
-        playwright = sync_playwright().start()
-        # Connect now, not on the first message: cdp-server launches Chrome on its
-        # first connection, which can take minutes on a cold start. It also starts
-        # after this server, so keep trying for a while; after that a run retries.
-        deadline = time.time() + BROWSER_START_SECONDS
-        while True:
+    def work_on(self, browser, playwright, item):
+        """On `browser`'s worker thread: one run, smoke test or chore."""
+        if isinstance(item, smoke.Smoke):
+            self.events.publish("smoke.started", smoke=item.id)
             try:
-                self._connect(playwright)
-                break
-            except (PlaywrightError, OSError, WebSocketException) as exc:
-                if time.time() > deadline:
-                    print(f"browser not reachable, the first run will retry: {exc}", file=sys.stderr, flush=True)
-                    break
-                time.sleep(2)
-        while True:
-            run = self.queue.get()
-            if isinstance(run, smoke.Smoke):
-                self.events.publish("smoke.started", smoke=run.id)
-                try:
-                    smoke.run(self._connect(playwright), run, self.notebook, self._has_key())
-                except Exception as exc:  # noqa: BLE001 - the worker must outlive one bad job
-                    traceback.print_exc()
-                    run.status = f"failed: {type(exc).__name__}: {exc}"
-                finally:
-                    view = run.view()
-                    self.events.publish("smoke.finished", smoke=run.id, status=view["status"],
-                                        passed=view["passed"], total=view["total"])
-                    run.done.set()
-                continue
-            if not isinstance(run, Run):
-                # A small browser chore (opening the setup page), not a chat run.
-                try:
-                    run(self._connect(playwright))
-                except Exception:  # noqa: BLE001 - a chore must not stop the worker
-                    traceback.print_exc()
-                continue
-            self.current = run
-            try:
-                self._run(playwright, run)
-            except Exception as exc:  # noqa: BLE001 - the worker must outlive one bad run
+                smoke.run(browser.connect(playwright), browser.cdp_url, browser.display, item, self.notebook,
+                          self._has_key())
+            except Exception as exc:  # noqa: BLE001 - the worker must outlive one bad job
                 traceback.print_exc()
-                run.status = "failed"
-                run.error = f"{type(exc).__name__}: {exc}"
-                run.reply = run.reply or f"Stealthbox hit an internal error: {exc}"
+                item.status = f"failed: {type(exc).__name__}: {exc}"
             finally:
-                run.finished = now()
-                run.session.last_used = time.time()
-                if run.status in ("needs_user", "needs_input"):
-                    # Never hide a question for the user in the archive.
-                    self.archive(run.session, False)
-                run.persist()
-                self.current = None
-                view = run.view()
-                self.events.publish("run.finished", run=run.id, session=run.session.id,
-                                    status=run.status, reply=run.reply, error=run.error,
-                                    final_url=run.final_url, needs_user=run.needs_user,
-                                    steps=view["steps"],
-                                    files=view["files"], cost_usd=view["cost_usd"])
-                run.done.set()
+                view = item.view()
+                self.events.publish("smoke.finished", smoke=item.id, status=view["status"],
+                                    passed=view["passed"], total=view["total"])
+                item.done.set()
+            return
+        if not isinstance(item, Run):
+            # A small browser chore (opening the setup page, a blank session's tab), not a chat run.
+            try:
+                item(browser.connect(playwright))
+            except Exception:  # noqa: BLE001 - a chore must not stop the worker
+                traceback.print_exc()
+            return
+        run = item
+        browser.current = run
+        try:
+            self._run(browser, playwright, run)
+        except Exception as exc:  # noqa: BLE001 - the worker must outlive one bad run
+            traceback.print_exc()
+            run.status = "failed"
+            run.error = f"{type(exc).__name__}: {exc}"
+            run.reply = run.reply or f"Stealthbox hit an internal error: {exc}"
+        finally:
+            browser.current = None
+            self._finished(run)
+        if not browser.main and browser.ready:
+            try:
+                browser.save_cookies()
+            except Exception as exc:  # noqa: BLE001 - the run is over; the next save carries these too
+                traceback.print_exc()
+                self.events.publish("browser.cookies_not_saved", browser=browser.key, error=f"{type(exc).__name__}: {exc}")
+        with self.lock:
+            # The session may be idle now, and its browser free for a waiting run.
+            self.dispatch()
 
-    def _connect(self, playwright):
-        if self.browser is None or not self.browser.is_connected():
-            reconnect = self.browser is not None
-            closed = agent.close_unresponsive_tabs()
-            if closed:
-                self.events.publish("browser.hung_tabs_closed", urls=closed)
-            self.browser = playwright.chromium.connect_over_cdp(CDP_URL)
-            self.events.publish("browser.connected", reconnect=reconnect)
-            # Pages from an old connection are dead.
-            for session in self._sessions():
-                if session.page is not None:
-                    self.events.publish("session.tab_lost", session=session.id)
-                session.page = None
-        return self.browser.contexts[0]
+    def _finished(self, run):
+        run.finished = now()
+        run.session.last_used = time.time()
+        if run.status in ("needs_user", "needs_input"):
+            # Never hide a question for the user in the archive.
+            self.archive(run.session, False)
+        run.persist()
+        view = run.view()
+        self.events.publish("run.finished", run=run.id, session=run.session.id,
+                            status=run.status, reply=run.reply, error=run.error,
+                            final_url=run.final_url, needs_user=run.needs_user,
+                            steps=view["steps"],
+                            files=view["files"], cost_usd=view["cost_usd"])
+        run.done.set()
+
+    def browser_closed(self, browser):
+        """From a session browser's worker as it exits: its place is free."""
+        with self.lock:
+            self.browsers.pop(browser.key, None)
+            self.dispatch()
+
+    def _wait_for_browser(self, session, item):
+        """Under self.lock: `item` (a run or chore) goes to the session's browser once it has one."""
+        session.pending.append(item)
+        if session not in self.waiting:
+            self.waiting.append(session)
+        self.dispatch()
+
+    def dispatch(self):
+        """Under self.lock: give waiting sessions a browser, oldest first, and it their work."""
+        while self.waiting:
+            session = self.waiting[0]
+            if not self._give_browser(session):
+                return
+            self.waiting.pop(0)
+            for item in session.pending:
+                session.browser.queue.put(item)
+            session.pending.clear()
+
+    def _forget(self, session):
+        """Under self.lock, for a session gone from self.sessions: it waits for nothing, and
+        its own browser closes (its cookies kept). A borrowed tab stays open."""
+        if session in self.waiting:
+            self.waiting.remove(session)
+        session.pending.clear()
+        if session.browser is not None and not session.borrowed:
+            self._take_browser(session)
+
+    def _give_browser(self, session):
+        """Under self.lock: open a browser of its own for the session, if fewer than
+        SESSION_BROWSERS are open. At the limit, the least recently used session that is
+        done (not working, waiting, or waiting on the user, and not being watched) gives
+        its browser up. Returns whether the session got one."""
+        if len(self.browsers) >= SESSION_BROWSERS:
+            # One closing already frees a place; closing another would leave one spare.
+            if any(browser.closing for browser in self.browsers.values()):
+                return False
+            idle = [s for s in self.sessions.values()
+                    if s.browser is not None and not s.borrowed and s.state() in ("done", "stopped")
+                    and not s.browser.viewers]
+            if not idle:
+                return False
+            self._take_browser(min(idle, key=lambda s: s.last_used))
+            return False
+        browser = Browser(self, f"{session.id}-{secrets.token_hex(2)}")
+        self.browsers[browser.key] = browser
+        session.browser, session.page, session.target_id = browser, None, None
+        browser.thread.start()
+        self.events.publish("session.browser_opened", session=session.id, browser=browser.key)
+        return True
+
+    def _take_browser(self, session):
+        """Under self.lock: close the session's own browser. Its tab and live view go; its
+        conversation stays, and its next message gets it a new browser."""
+        browser, session.browser, session.page = session.browser, None, None
+        browser.close()
+        self.events.publish("session.browser_closed", session=session.id, browser=browser.key)
+
+    def _expire_sessions(self):
+        """Forget sessions idle for SESSION_IDLE_SECONDS, closing their own browsers."""
+        while True:
+            time.sleep(EXPIRY_CHECK_SECONDS)
+            cutoff = time.time() - SESSION_IDLE_SECONDS
+            # The main browser's tab in front is the one the user is looking at, perhaps
+            # browsing in it by hand, which no request to the API shows; so is a session
+            # browser with a live view connected.
+            front = (self.main.front_tab() or {}).get("id")
+            with self.lock:
+                stale = [s for s in self.sessions.values()
+                         if not s.busy and s.last_used < cutoff
+                         and not (front and s.browser is self.main and s.target_id == front)
+                         and not (s.browser and s.browser.viewers)]
+                for session in stale:
+                    del self.sessions[session.id]
+                    self._forget(session)
+            for session in stale:
+                self.events.publish("session.expired", session=session.id)
 
     def _stepped(self, run):
         run.persist()
@@ -788,22 +1110,6 @@ class Stealthbox:
         """Where a step is (looking, thinking, acting), so a slow step still shows progress."""
         run.phase = {"phase": phase, "text": text, "reason": reason, "since_ms": int(time.time() * 1000)}
         self.events.publish("run.phase", run=run.id, session=run.session.id, **run.phase)
-
-    def _expire_sessions(self, context):
-        cutoff = time.time() - SESSION_IDLE_SECONDS
-        # The tab in front is the one the user is looking at, perhaps browsing in it
-        # by hand, which no request to the API shows.
-        front = (self.front_tab() or {}).get("id")
-        with self.lock:
-            stale = [s for s in self.sessions.values()
-                     if not s.busy and s.last_used < cutoff and not (front and s.target_id == front)]
-            for session in stale:
-                del self.sessions[session.id]
-        for session in stale:
-            page = None if session.borrowed else self._session_page(context, session)
-            if page is not None:
-                page.close()
-            self.events.publish("session.expired", session=session.id)
 
     def _borrowed_page(self, context, target_id):
         """The open tab with this target id. A tab the caller opened a moment ago
@@ -832,19 +1138,25 @@ class Stealthbox:
         except PlaywrightError:
             return None
 
-    def _run(self, playwright, run):
+    def _run(self, browser, playwright, run):
         if run.cancel_requested:
             run.status = "cancelled"
             run.reply = "Cancelled before it started."
             return
-        context = self._connect(playwright)
-        self._expire_sessions(context)
+        run.status = "running"
+        run.phase = {"phase": "starting", "text": "Getting the tab ready" if browser.ready else "Opening its browser",
+                     "reason": None, "since_ms": int(time.time() * 1000)}
+        self.events.publish("run.started", run=run.id, session=run.session.id)
+        context = browser.connect(playwright)
         session = run.session
         if session.page is None and session.borrowed:
             session.page = self._borrowed_page(context, session.target_id)
         if session.page is None or session.page.is_closed():
-            # Its own tab if it is still open (the browser reconnected since), else a new one.
-            session.page = self._session_page(context, session) or context.new_page()
+            # Its own tab if it is still open (the browser reconnected since); in a new
+            # browser of its own, the tab the browser opened with; else a new one.
+            session.page = (self._session_page(context, session)
+                            or (context.pages[0] if session.target_id is None and context.pages else None)
+                            or context.new_page())
         page = session.page
         try:
             page.bring_to_front()
@@ -857,12 +1169,8 @@ class Stealthbox:
         page.set_default_timeout(30000)
         session.target_id = agent.humanize.target_id(page)
 
-        run.status = "running"
-        run.phase = {"phase": "starting", "text": "Getting the tab ready", "reason": None,
-                     "since_ms": int(time.time() * 1000)}
-        self.events.publish("run.started", run=run.id, session=session.id)
-        turn = agent.Turn(run.id, context, run.message, list(session.conversation), self.notebook,
-                          run.dir, run.max_stuck_steps, agent.DEFAULT_MODEL)
+        turn = agent.Turn(run.id, context, browser.cdp_url, browser.display, run.message, list(session.conversation),
+                          self.notebook, run.dir, run.max_stuck_steps, agent.DEFAULT_MODEL)
         # Set run.turn before reading the flag: cancel() sets the flag, then the
         # turn's, so a cancel that lands between the two lines is not lost.
         run.turn = turn
@@ -1065,16 +1373,27 @@ def make_handler(stealthbox, token):
             cloudflared keeps connections to this server alive and sends the next
             request down the same one, so a file request is one request and one
             response, never a pipe: a pipe would hand that next request to noVNC.
+
+            /viewer/sessions/<key>/websockify is a session browser's display, through
+            the websockify that routes by the browser's key; the rest is the main one's.
             """
             upgrade = self.headers.get("Upgrade", "").lower() == "websocket"
-            upstream = socket.create_connection(("127.0.0.1", VIEWER_PORT))
-            path = self.path[len("/viewer"):] or "/"
+            parts = self._parts()
+            if len(parts) == 4 and parts[1] == "sessions" and parts[3] == "websockify":
+                try:
+                    browser = stealthbox.browser(parts[2])
+                except LookupError as exc:
+                    return self._send(404, {"error": str(exc)})
+                port, path = SESSION_VIEWER_PORT, f"/websockify?token={browser.key}"
+            else:
+                browser, port, path = stealthbox.main, VIEWER_PORT, self.path[len("/viewer"):] or "/"
+            upstream = socket.create_connection(("127.0.0.1", port))
             head = [f"{self.command} {path} {self.request_version}"]
             for name, value in self.headers.items():
                 if name.lower() in ("cookie", "host") or (name.lower() == "connection" and not upgrade):
                     continue
                 head.append(f"{name}: {value}")
-            head.append(f"Host: 127.0.0.1:{VIEWER_PORT}")
+            head.append(f"Host: 127.0.0.1:{port}")
             if not upgrade:
                 head.append("Connection: close")
             upstream.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
@@ -1112,12 +1431,20 @@ def make_handler(stealthbox, token):
             pump = threading.Thread(target=to_client, daemon=True)
             self._responded = True
             pump.start()
+            # Someone is watching: the browser is not closed for being idle.
+            with stealthbox.lock:
+                browser.viewers += 1
             try:
                 while chunk := self.rfile.read1(65536):
                     upstream.sendall(chunk)
             except OSError:
                 pass
             finally:
+                with stealthbox.lock:
+                    browser.viewers -= 1
+                    # Unwatched, a finished session's browser can go to one that waits.
+                    if not browser.viewers:
+                        stealthbox.dispatch()
                 upstream.close()
                 pump.join(5)
             return None
@@ -1241,11 +1568,19 @@ def make_handler(stealthbox, token):
                 text = parse_qs(urlparse(self.path).query).get("q", [""])[0]
                 return self._send(200, {"suggestions": agent.history_suggestions(text) if text.strip() else []})
             if parts == ["v1", "browser", "screenshot"]:
-                width = parse_qs(urlparse(self.path).query).get("width", [str(PREVIEW_WIDTH)])[0]
+                query = parse_qs(urlparse(self.path).query)
+                width = query.get("width", [str(PREVIEW_WIDTH)])[0]
                 if not width.isdigit():
                     raise BadRequest("width must be a whole number of pixels")
                 width = int(width)
-                return self._send_image(agent.display_thumbnail(min(width, MAX_PREVIEW_WIDTH)))
+                # A session's own browser, or the main browser.
+                try:
+                    browser = stealthbox.session(query["session"][0]).browser if "session" in query else stealthbox.main
+                except LookupError as exc:
+                    return self._send(404, {"error": str(exc)})
+                if browser is None or browser.display is None:
+                    return self._send(404, {"error": "that session has no browser open"})
+                return self._send_image(agent.display_thumbnail(browser.display, min(width, MAX_PREVIEW_WIDTH)))
             if parts == ["v1", "status"]:
                 return self._send(200, stealthbox.status())
             if parts == ["v1", "devices"]:
@@ -1257,7 +1592,7 @@ def make_handler(stealthbox, token):
                     session = stealthbox.session(parts[2])
                 except LookupError as exc:
                     return self._send(404, {"error": str(exc)})
-                return self._send(200, session.view(stealthbox.share, stealthbox.front_tab()))
+                return self._send(200, stealthbox.session_view(session))
             if parts == ["v1", "events"]:
                 return self._stream_events()
             if parts == ["v1", "events", "next"]:
@@ -1567,7 +1902,7 @@ def main():
     os.makedirs(os.path.join(DATA_DIR, "runs"), exist_ok=True)
     token = load_token()
     stealthbox = Stealthbox()
-    threading.Thread(target=stealthbox.work, name="browser-worker", daemon=True).start()
+    stealthbox.start()
     server = Server(("0.0.0.0", PORT), make_handler(stealthbox, token))
     print(f"stealthbox api on :{PORT}, model {agent.DEFAULT_MODEL}, data {DATA_DIR}", flush=True)
     server.serve_forever()

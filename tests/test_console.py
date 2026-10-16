@@ -112,7 +112,18 @@ CHROMIUM = []
 
 
 def stealthbox_browser():
-    return CHROMIUM[0].connect_over_cdp(CDP_URL or json.loads(stealthbox("status", "--json"))["cdp_url"])
+    """The main browser, over CDP."""
+    return CHROMIUM[0].connect_over_cdp(main_cdp_url())
+
+
+def main_cdp_url():
+    return CDP_URL or json.loads(stealthbox("status", "--json"))["cdp_url"]
+
+
+def session_browser(view):
+    """A session's own browser, over CDP (cdp-server routes it by the browser's key)."""
+    key = view["browser"]["viewer"].split("/")[-2]
+    return CHROMIUM[0].connect_over_cdp(f"{main_cdp_url()}/sessions/{key}")
 
 
 @pytest.fixture(scope="module")
@@ -161,7 +172,7 @@ def page(browser, link):
         f"{request.method} {request.url} -> {request.failure}"))
     yield page
     # Stop and close what this test opened, so the next one starts from the same list:
-    # a run a failed test left going (or paused) holds the one browser worker.
+    # a run a failed test left going (or paused) holds a browser the next test may need.
     opened = [s["session"] for s in context.request.get(base + "/v1/sessions").json()["sessions"]
               if s["session"] not in before]
     deadline = time.time() + RUN_SECONDS
@@ -284,7 +295,7 @@ def test_signing_out_another_device_sends_it_back_to_sign_in(browser, link):
 def test_new_session_runs_to_a_reply_with_steps_and_a_live_view(page):
     session = start_session(page, "Open example.com and tell me the page's title.")
     expect(list_item(page, session)).to_be_visible()
-    expect(status(page)).to_have_text(re.compile("Waiting its turn|Working"), timeout=30000)
+    expect(status(page)).to_have_text(re.compile("Waiting|Working"), timeout=30000)
 
     # Progress inside the first step: what it is doing, for how long, and the live tab.
     now = page.get_by_test_id("now")
@@ -327,7 +338,7 @@ def test_new_session_runs_to_a_reply_with_steps_and_a_live_view(page):
 
 def test_a_follow_up_queues_behind_the_run_and_stays_in_the_same_tab(page):
     session = start_session(page, "Open example.com and tell me the page's title.")
-    expect(status(page)).to_have_text(re.compile("Waiting its turn|Working"), timeout=30000)
+    expect(status(page)).to_have_text(re.compile("Waiting|Working"), timeout=30000)
     page.get_by_test_id("reply").fill("What does the one link on that page say?")
     page.get_by_test_id("send").click()
 
@@ -429,7 +440,8 @@ def test_a_blank_session_opens_a_new_tab_to_browse_with_no_task(page):
     expect(page.get_by_test_id("session-title")).to_have_text("New session")
     expect(page.get_by_test_id("blank-hint")).to_be_visible()
     view = api_get(page, f"/v1/sessions/{session}")
-    assert view["messages"] == [] and view["tab"] == api_get(page, "/v1/status")["front_tab"]["id"]
+    # A browser of its own, with the session's tab in front.
+    assert view["messages"] == [] and view["in_front"] and view["browser"]["kind"] == "own", view
 
     # The user drives it: the mouse is theirs, and the address bar loads in this session's tab.
     expect(page.get_by_test_id("live-view")).to_have_attribute("data-view-only", "false", timeout=15000)
@@ -440,7 +452,7 @@ def test_a_blank_session_opens_a_new_tab_to_browse_with_no_task(page):
     url.press("Enter")
     expect(page.get_by_test_id("session-title")).to_have_text("example.com", timeout=15000)
     expect(list_item(page, session)).to_contain_text("example.com")
-    assert api_get(page, "/v1/status")["front_tab"]["id"] == view["tab"]
+    assert api_get(page, f"/v1/sessions/{session}")["tab"] == view["tab"]
 
     page.get_by_test_id("close").click()
     expect(list_item(page, session)).to_have_count(0)
@@ -488,37 +500,99 @@ def test_a_request_that_fails_on_the_server_says_what_failed(page):
         assert response.status == 400 and error in response.json()["error"], f"{path} {body}: {response.text()}"
 
 
-def test_a_blank_session_opened_while_a_run_works_says_it_waits_and_comes_to_the_front_after(page):
-    """One screen, one mouse: the new tab opens at once behind the run's, and the console
-    says so, instead of a session with no tab and nothing happening."""
+def test_a_blank_session_opened_while_a_run_works_is_live_at_once_in_a_browser_of_its_own(page):
+    """Each session has its own browser, so a run never holds the screen another session needs."""
     working = start_session(page, "Go to wikipedia.org, search for Austin, Texas, open the article, then open "
                                   "the article of each of the ten largest cities in Texas one by one, and tell "
                                   "me the population in each infobox and the name of each mayor.")
     expect(status(page)).to_have_text("Working", timeout=RUN_TIMEOUT)
-    page.wait_for_function("() => document.querySelectorAll('[data-testid=steps] li').length >= 1",
-                           timeout=RUN_TIMEOUT)
-    front = api_get(page, "/v1/status")["front_tab"]["id"]
 
-    page.get_by_test_id("new-blank").click()
-    page.wait_for_function("working => location.hash.startsWith('#s_') && location.hash.slice(1) !== working",
-                           arg=working, timeout=10000)
-    blank = page.evaluate("location.hash.slice(1)")
-    view = api_get(page, f"/v1/sessions/{blank}")
-    assert view["tab"] and not view["in_front"], view
-    assert api_get(page, "/v1/status")["front_tab"]["id"] == front, "the run's tab lost the front"
-    expect(page.get_by_test_id("now-label")).to_have_text("Opening")
-    expect(page.get_by_test_id("now-text")).to_contain_text("comes to the front when that run is done")
-
-    page.get_by_test_id("go-to-busy").click()
-    expect(page).to_have_url(re.compile(f"#{working}$"))
-    page.get_by_test_id("cancel").click()
-    expect(status(page)).to_have_text("Stopped", timeout=RUN_TIMEOUT)
-
-    # The worker is free: the blank tab comes to the front, ready to browse.
-    list_item(page, blank).click()
+    blank = open_blank_session(page)
     expect(status(page)).to_have_text("New")
     expect(page.get_by_test_id("live-view")).to_have_attribute("data-view-only", "false", timeout=30000)
-    assert api_get(page, "/v1/status")["front_tab"]["id"] == view["tab"]
+    expect(page.get_by_test_id("live-view")).to_have_attribute("data-connected", "true", timeout=30000)
+    assert api_get(page, f"/v1/sessions/{working}")["state"] == "working"
+    assert api_get(page, f"/v1/sessions/{blank}")["browser"]["viewer"] != \
+        api_get(page, f"/v1/sessions/{working}")["browser"]["viewer"]
+
+
+def test_two_sessions_work_at_the_same_time(page):
+    base = page.url.split("/console")[0]
+    first = start_session(page, "Open example.com and tell me the page's title.")
+    second = start_session(page, "Open example.org and tell me the page's title.")
+    deadline = time.time() + RUN_SECONDS
+    while sorted(api_get(page, f"/v1/sessions/{s}")["state"] for s in (first, second)) != ["working", "working"]:
+        assert time.time() < deadline, "the two sessions never worked at once"
+        time.sleep(1)
+    assert len(page.request.get(base + "/v1/status").json()["running"]) >= 2
+    for session in (first, second):
+        list_item(page, session).click()
+        expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
+
+
+def test_at_the_limit_a_session_waits_for_a_browser_and_a_finished_one_gives_its_up(page):
+    """At most `limit` session browsers are open. A new session waits while every one is
+    in use, and takes the browser of the least recently used finished session."""
+    base = page.url.split("/console")[0]
+    limit = api_get(page, "/v1/status")["session_browsers"]["limit"]
+    finished = start_session(page, "Open example.com and tell me the page's title.")
+    expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
+    # Blank sessions are in use (the user browses in them); they keep their browsers.
+    blanks = [open_blank_session(page) for _ in range(limit - 1)]
+    assert api_get(page, "/v1/status")["session_browsers"]["open"] == limit
+
+    # A new session takes the finished one's browser (not while the console shows it live,
+    # so look at another session first). The finished one keeps its last screenshot.
+    list_item(page, blanks[0]).click()
+    taker = start_session(page, "Open example.org and tell me the page's title.")
+    expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
+    gave_up = api_get(page, f"/v1/sessions/{finished}")
+    assert gave_up["browser"] is None and gave_up["state"] == "done", gave_up
+    list_item(page, finished).click()
+    expect(page.get_by_test_id("still-view")).to_be_visible()
+    expect(page.locator("#s-still-text")).to_contain_text("closed to make room")
+
+    # Every browser held by a blank session: the next session waits, and says so, until one closes.
+    page.request.post(f"{base}/v1/sessions/{taker}/close", headers={"Origin": base})
+    blanks.append(page.request.post(base + "/v1/sessions", headers={"Origin": base}).json()["session"])
+    deadline = time.time() + 60
+    while not api_get(page, f"/v1/sessions/{blanks[-1]}")["in_front"]:
+        assert time.time() < deadline, "the blank session never got the taker's browser"
+        time.sleep(1)
+    waiting = page.request.post(base + "/v1/sessions", headers={"Origin": base}).json()["session"]
+    page.goto(f"{base}/console#{waiting}")
+    expect(page.get_by_test_id("now-text")).to_contain_text("Waiting for a browser", timeout=15000)
+    assert api_get(page, f"/v1/sessions/{waiting}")["waiting_for_browser"]
+    page.request.post(f"{base}/v1/sessions/{blanks[0]}/close", headers={"Origin": base})
+    deadline = time.time() + 60
+    while not api_get(page, f"/v1/sessions/{waiting}")["in_front"]:
+        assert time.time() < deadline, "the waiting session never got the browser that closed"
+        time.sleep(1)
+
+
+def test_a_cookie_set_in_a_sessions_browser_reaches_the_main_browser_when_it_closes(page):
+    """Signed in inside a session, signed in from then on: its new cookies go back to the main profile."""
+    session = open_blank_session(page)
+    base = page.url.split("/console")[0]
+    page.request.post(base + "/v1/browser/navigate", headers={"Origin": base},
+                      data={"url": "https://example.com/", "session": session})
+    marker = f"kept-{int(time.time())}"
+    own = session_browser(api_get(page, f"/v1/sessions/{session}"))
+    try:
+        tab = next(item for item in own.contexts[0].pages if "example.com" in item.url)
+        tab.evaluate(f"document.cookie = 'stealthbox_test={marker}; max-age=3600; path=/'")
+    finally:
+        own.close()
+    page.request.post(f"{base}/v1/sessions/{session}/close", headers={"Origin": base})
+    main = stealthbox_browser()
+    try:
+        deadline = time.time() + 30
+        while not any(c["name"] == "stealthbox_test" and c["value"] == marker
+                      for c in main.contexts[0].cookies("https://example.com/")):
+            assert time.time() < deadline, "the session's cookie never reached the main browser"
+            time.sleep(1)
+    finally:
+        main.close()
 
 
 def test_the_x_archives_a_session_into_a_closed_archive_at_the_bottom_and_restore_brings_it_back(page):
@@ -678,9 +752,21 @@ def test_the_browser_entry_has_an_x_that_closes_its_tab(browser, page):
 
 
 def test_the_browser_entry_x_on_an_archived_sessions_tab_closes_the_tab_and_the_session(page):
-    """Archived, a session leaves the list, so the Browser entry stands for its tab."""
-    session = open_blank_session(page)
-    tab = api_get(page, f"/v1/sessions/{session}")["tab"]
+    """Archived, a session in a main-browser tab leaves the list, so the Browser entry stands for its tab."""
+    base = page.url.split("/console")[0]
+    driver = stealthbox_browser()
+    try:
+        lent = driver.contexts[0].new_page()
+        lent.goto("https://example.com/", wait_until="domcontentloaded")
+        lent.bring_to_front()
+        tab = driver.contexts[0].new_cdp_session(lent).send("Target.getTargetInfo")["targetInfo"]["targetId"]
+    finally:
+        driver.close()
+    run = page.request.post(base + "/v1/chat", headers={"Origin": base},
+                            data={"message": "Tell me this page's title.", "tab": tab, "wait": False}).json()
+    page.request.post(f"{base}/v1/runs/{run['run']}/cancel", headers={"Origin": base})
+    session = run["session"]
+    list_item(page, session).wait_for()
     archive_from_the_list(page, session)
     entry = page.get_by_test_id("browser-item")
     expect(entry).to_be_visible(timeout=10000)
@@ -688,7 +774,6 @@ def test_the_browser_entry_x_on_an_archived_sessions_tab_closes_the_tab_and_the_
     entry.hover()
     x_of(entry).click()
     expect(page.get_by_test_id("archive")).to_have_count(0, timeout=15000)
-    base = page.url.split("/console")[0]
     assert page.request.get(f"{base}/v1/sessions/{session}").status == 404
     assert api_get(page, "/v1/status")["front_tab"]["id"] != tab
 
@@ -758,7 +843,7 @@ def test_a_sign_in_hands_off_with_a_session_link_that_opens_anywhere(browser, pa
     phone_page.get_by_test_id("carry-on").click()
     expect(phone_page.get_by_test_id("message-you").last.locator(".bubble")).to_have_text("I’m done, carry on")
     expect(phone_page.get_by_test_id("session-status")).to_have_text(
-        re.compile("Waiting its turn|Working"), timeout=30000)
+        re.compile("Waiting|Working"), timeout=30000)
     expect(phone_page.get_by_test_id("session-status")).to_have_text("Needs you", timeout=RUN_TIMEOUT)
     expect(phone_page.get_by_test_id("message-stealthbox")).to_have_count(2)
     assert_on_screen(phone_page, phone_page.get_by_test_id("message-stealthbox").last)
@@ -773,22 +858,25 @@ def test_a_sign_in_hands_off_with_a_session_link_that_opens_anywhere(browser, pa
 # ---------------------------------------------------------------- tabs
 
 
-def test_show_it_live_brings_a_background_session_to_the_front_and_close_forgets_it(page):
+def test_each_session_shows_its_own_browser_live_and_close_closes_it(page):
     first = start_session(page, "Open example.com and tell me the page's title.")
     expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
     second = start_session(page, "Open example.org and tell me the page's title.")
     expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
 
-    list_item(page, first).click()
-    expect(page.get_by_test_id("still-view")).to_be_visible()
-    page.get_by_test_id("show-live").click()
-    expect(page.get_by_test_id("live-view")).to_be_visible(timeout=30000)
+    for session, site in ((first, "example.com"), (second, "example.org")):
+        list_item(page, session).click()
+        expect(page.get_by_test_id("live-view")).to_be_visible()
+        expect(page.get_by_test_id("live-view")).to_have_attribute("data-connected", "true", timeout=30000)
+        expect(page.get_by_test_id("url")).to_have_value(re.compile(site), timeout=15000)
 
-    list_item(page, second).click()
-    expect(page.get_by_test_id("still-view")).to_be_visible()
-
+    open_before = api_get(page, "/v1/status")["session_browsers"]["open"]
     page.get_by_test_id("close").click()
     expect(list_item(page, second)).to_have_count(0)
+    deadline = time.time() + 30
+    while api_get(page, "/v1/status")["session_browsers"]["open"] != open_before - 1:
+        assert time.time() < deadline, "the closed session's browser stayed open"
+        time.sleep(1)
     list_item(page, first).click()
     page.get_by_test_id("close").click()
     expect(list_item(page, first)).to_have_count(0)
@@ -817,20 +905,27 @@ def test_the_live_browser_view_follows_a_program_driving_the_browser_over_cdp(br
         driver.close()
 
 
-def test_show_it_live_on_a_session_whose_tab_was_closed_says_so(browser, page):
-    """A tab closed outside the console (in the viewer, or by another program) is gone;
-    bringing it to the front used to answer yes and show nothing."""
+def test_a_session_whose_browser_closed_with_its_last_tab_says_so_and_a_message_opens_it_again(browser, page):
+    """Chrome quits with its last tab. Closed outside the console (in the viewer, or by
+    another program), the session's browser is gone until its next message."""
     session = open_blank_session(page)
-    tab = api_get(page, f"/v1/sessions/{session}")["tab"]
-    driver = stealthbox_browser()
+    view = api_get(page, f"/v1/sessions/{session}")
+    own = session_browser(view)
     try:
-        cdp = driver.new_browser_cdp_session()
-        cdp.send("Target.closeTarget", {"targetId": tab})
+        own.new_browser_cdp_session().send("Target.closeTarget", {"targetId": view["tab"]})
+    except Exception:  # noqa: BLE001 - the browser can quit before it answers
+        pass
     finally:
-        driver.close()
+        own.close()
+    expect(page.get_by_test_id("now-text")).to_contain_text("closed with its last tab", timeout=30000)
     base = page.url.split("/console")[0]
     response = page.request.post(f"{base}/v1/sessions/{session}/focus", headers={"Origin": base})
-    assert response.status == 404 and "tab was closed" in response.json()["error"], response.text()
+    assert response.status == 404 and "no browser open" in response.json()["error"], response.text()
+
+    page.get_by_test_id("reply").fill("Open example.com and tell me the page's title.")
+    page.get_by_test_id("send").click()
+    expect(status(page)).to_have_text("Finished", timeout=RUN_TIMEOUT)
+    expect(stealthbox_messages(page).last.locator(".bubble")).to_contain_text(re.compile("example|domain", re.I))
 
 
 def front_tab_url(page):
