@@ -855,13 +855,37 @@ class TestXdotoolCommands:
         steps = xdotool_commands({"type": "move", "x": 100, "y": 40}, (217, 287), zoom=1.5)
         assert steps == [(0.0, ["mousemove", "367", "347"])]
 
-    def test_click_moves_first(self):
+    def test_click_moves_first_and_holds_the_button(self):
         steps = xdotool_commands({"type": "click", "x": 5, "y": 6}, (0, 173))
-        assert steps == [(0.0, ["mousemove", "5", "179"]), (0.0, ["click", "1"])]
+        assert [argv for _, argv in steps] == [["mousemove", "5", "179"], ["mousedown", "1"], ["mouseup", "1"]]
+        assert steps[1][0] == 0.0
+        assert 0.06 <= steps[2][0] <= 0.14
 
-    def test_type_and_key(self):
-        assert xdotool_commands({"type": "type", "text": "-n hi"}, (0, 0)) == [(0.0, ["type", "--delay", "90", "--", "-n hi"])]
-        assert xdotool_commands({"type": "key", "keys": "Return"}, (0, 0)) == [(0.0, ["key", "--", "Return"])]
+    def test_type_holds_each_key(self):
+        steps = xdotool_commands({"type": "type", "text": "-A\n"}, (0, 0))
+        assert [argv for _, argv in steps] == [
+            ["keydown", "--", "0x2d"], ["keyup", "--", "0x2d"],
+            ["keydown", "--", "0x41"], ["keyup", "--", "0x41"],
+            ["keydown", "--", "Return"], ["keyup", "--", "Return"],
+        ]
+        delays = [delay for delay, _ in steps]
+        assert delays[0] == 0.0 and delays[2] == delays[4] == 0.09
+        assert all(0.05 <= delay <= 0.12 for delay in delays[1::2])
+
+    def test_type_off_the_keymap_uses_xdotool_type(self):
+        assert xdotool_commands({"type": "type", "text": "ñ", "delay_ms": 0}, (0, 0)) == [(0.0, ["type", "--", "ñ"])]
+
+    def test_key_holds_the_combination(self):
+        steps = xdotool_commands({"type": "key", "keys": "ctrl+0"}, (0, 0))
+        assert [argv for _, argv in steps] == [["keydown", "--", "ctrl+0"], ["keyup", "--", "ctrl+0"]]
+        assert 0.05 <= steps[1][0] <= 0.12
+
+    def test_pointer_location_is_in_viewport_css_pixels(self):
+        async def fake_xdotool(argv):
+            assert argv == ["getmouselocation", "--shell"]
+            return "X=1300\nY=844\nSCREEN=0\nWINDOW=123\n"
+        with patch.object(_mod, "_run_xdotool", fake_xdotool):
+            assert asyncio.run(_mod.pointer_location((0, 244), 2.0)) == [650.0, 300.0]
 
     def test_unknown_action_fails(self):
         with pytest.raises(ValueError):

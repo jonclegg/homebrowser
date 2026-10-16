@@ -845,6 +845,37 @@ async def handle_close(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 INPUT_ACTION_TYPES = {"move", "path", "down", "up", "click", "wheel", "type", "key", "sleep"}
+# How long a hand holds a mouse button or a key down, in seconds. xdotool's own
+# click, key and type press and release in the same instant (measured on a page:
+# 1 ms from mousedown to mouseup, 0-11 ms from keydown to keyup), which no person
+# does, and a bot-check vendor challenged every run that clicked or typed that way.
+BUTTON_HOLD_SECONDS = (0.06, 0.14)
+KEY_HOLD_SECONDS = (0.05, 0.12)
+
+
+def keystroke(keysym: str, gap: float = 0.0) -> list[tuple[float, list[str]]]:
+    """One key pressed after gap seconds and held for a human moment."""
+    return [(gap, ["keydown", "--", keysym]), (random.uniform(*KEY_HOLD_SECONDS), ["keyup", "--", keysym])]
+
+
+def typing(text: str, gap: float) -> list[tuple[float, list[str]]]:
+    """Text as one held keystroke per character, gap seconds between keys."""
+    steps = []
+    for index, char in enumerate(text):
+        pause = gap if index else 0.0
+        if char == "\n":
+            steps += keystroke("Return", pause)
+        elif char == "\t":
+            steps += keystroke("Tab", pause)
+        elif " " <= char <= "~":
+            # A printable ASCII keysym is its code point; xdotool adds Shift itself.
+            steps += keystroke(hex(ord(char)), pause)
+        else:
+            # Not on the keyboard's map: xdotool binds a spare key to the character
+            # for one keystroke, which does not survive a separate keydown and keyup
+            # (measured: ñ dropped). A person types these with a compose key anyway.
+            steps.append((pause, ["type", "--", char]))
+    return steps
 
 
 def xdotool_commands(action: dict, origin: tuple[int, int], zoom: float = 1.0) -> list[tuple[float, list[str]]]:
@@ -866,27 +897,35 @@ def xdotool_commands(action: dict, origin: tuple[int, int], zoom: float = 1.0) -
     if kind in ("down", "up"):
         return [(0.0, [f"mouse{kind}", str(action.get("button", 1))])]
     if kind == "click":
+        button = str(action.get("button", 1))
         steps = [(0.0, move(action["x"], action["y"]))] if "x" in action else []
-        return steps + [(0.0, ["click", str(action.get("button", 1))])]
+        return steps + [(0.0, ["mousedown", button]), (random.uniform(*BUTTON_HOLD_SECONDS), ["mouseup", button])]
     if kind == "wheel":
         button = "4" if action.get("direction", "down") == "up" else "5"
         return [(0.0, ["click", "--repeat", str(action.get("clicks", 1)), "--delay", "60", button])]
     if kind == "type":
-        return [(0.0, ["type", "--delay", str(action.get("delay_ms", 90)), "--", action["text"]])]
+        return typing(action["text"], action.get("delay_ms", 90) / 1000.0)
     if kind == "key":
-        return [(0.0, ["key", "--", action["keys"]])]
+        return keystroke(action["keys"])
     if kind == "sleep":
         return [(action["ms"] / 1000.0, [])]
     raise ValueError(f"unknown input action type: {kind!r}")
 
 
-async def _run_xdotool(argv: list[str]) -> None:
+async def _run_xdotool(argv: list[str]) -> str:
     process = await asyncio.create_subprocess_exec(
-        "xdotool", *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        "xdotool", *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await process.communicate()
+    stdout, stderr = await process.communicate()
     if process.returncode != 0:
         raise RuntimeError(f"xdotool {' '.join(argv)} failed: {stderr.decode().strip()}")
+    return stdout.decode()
+
+
+async def pointer_location(origin: tuple[int, int], zoom: float) -> list[float]:
+    """Where the pointer is, in the page's viewport CSS pixels (off the page included)."""
+    shell = dict(line.split("=", 1) for line in (await _run_xdotool(["getmouselocation", "--shell"])).split())
+    return [(int(shell["X"]) - origin[0]) / zoom, (int(shell["Y"]) - origin[1]) / zoom]
 
 
 def _reject_display_request(request: web.Request) -> web.Response | None:
@@ -928,7 +967,11 @@ async def handle_window(request: web.Request) -> web.Response:
 
 
 async def handle_input(request: web.Request) -> web.Response:
-    """Run native input actions against one page: POST {"target": id, "actions": [...]}."""
+    """Run native input actions against one page: POST {"target": id, "actions": [...]}.
+
+    The answer carries the pointer's position afterwards ("cursor", viewport CSS
+    pixels), so a caller starts its next path where the pointer really is.
+    """
     rejected = _reject_display_request(request)
     if rejected is not None:
         return rejected
@@ -965,7 +1008,8 @@ async def handle_input(request: web.Request) -> web.Response:
                 await asyncio.sleep(delay)
             if argv:
                 await _run_xdotool(argv)
-    return web.json_response({"ok": True, "origin": list(origin), "zoom": zoom, "actions": len(actions)})
+    return web.json_response({"ok": True, "origin": list(origin), "zoom": zoom, "actions": len(actions),
+                              "cursor": await pointer_location(origin, zoom)})
 
 
 async def handle_root(request: web.Request) -> web.Response:

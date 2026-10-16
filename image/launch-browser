@@ -232,6 +232,13 @@ def main():
     # it the container gives 124.0434748024636, exactly Chrome on an M-series Mac.
     config["noise"] = {"canvasSeed": sub_seed(seed, "canvas")}
     config["noise"]["deviceIdSalt"] = sub_seed(seed, "deviceId")
+    # The catalogue's chrome height is the persona machine's toolbar (87 px on a
+    # Mac), but mouse events land under this window's own toolbar (89 px): every
+    # event's screenY - clientY sat 2 px off window.screenY + outerHeight -
+    # innerHeight, and the maximized window came up 2 px short of availHeight.
+    # Pages without input never saw it; a bot-check vendor challenged every run
+    # that moved the mouse. Without the delta the core reports the real window.
+    del config["screen"]["chromeHeightDelta"]
     config["fontsHidden"] = sorted(set(config["fontsHidden"]) | image_font_families())
     # Fury's derivation writes [], and Chrome on a desktop answers ["Desktop"]:
     # measured against a stock Chrome 146 on the same page.
