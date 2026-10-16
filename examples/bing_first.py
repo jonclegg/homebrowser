@@ -293,8 +293,11 @@ def _enter(page, domain, skip=0):
     humanize.pause(0.4, 0.9)
     button = _first_visible(page, SEARCH_BUTTONS)
     if button is None:
-        raise RuntimeError("Bing search button not found")
-    humanize.human_click(page, *button)
+        # One of Bing's layouts has no search button at all (measured: #search_icon and
+        # the aria-labelled button absent, #sb_form_go display:none); Enter submits.
+        humanize.press(page, "Enter")
+    else:
+        humanize.human_click(page, *button)
     page.wait_for_load_state("domcontentloaded")
     humanize.pause(0.8, 1.6)
     link = _organic_link(page, domain, skip=skip)
