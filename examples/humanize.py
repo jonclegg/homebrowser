@@ -175,8 +175,39 @@ def click_at(page, x, y):
 
 ###############################################################################
 
-def human_click(page, locator):
-    box = locator.bounding_box()
+# The first element matching a CSS selector (and holding the text, when given)
+# that is on screen and shown, as the agent reads pages (agent/steps.py HINTS_SCRIPT).
+FIND_SCRIPT = """([selector, text]) => {
+  for (const el of document.querySelectorAll(selector)) {
+    if (text && !(el.innerText || '').includes(text)) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width < 4 || box.height < 4) continue;
+    if (box.bottom < 0 || box.right < 0 || box.top > innerHeight || box.left > innerWidth) continue;
+    const style = getComputedStyle(el);
+    if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
+  }
+  return null;
+}"""
+
+
+def find(page, selector, text=None):
+    """The viewport box {x, y, width, height} of the first visible match, or None.
+
+    One page.evaluate in Patchright's isolated world. Patchright's locator API
+    sends some 25 CDP calls per lookup (DOM.describeNode, DOM.resolveNode,
+    DOM.getBoxModel, Runtime.getProperties...), and a bot-check vendor saw it:
+    a search box found this way passed 3 of 3, found by locator it was
+    challenged at once, with the same input.
+    """
+    return page.evaluate(FIND_SCRIPT, [selector, text])
+
+###############################################################################
+
+def human_click(page, selector, text=None):
+    box = find(page, selector, text)
+    if box is None:
+        raise RuntimeError(f"nothing visible matches {selector!r}" + (f" with text {text!r}" if text else ""))
     x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
     y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
     click_at(page, x, y)

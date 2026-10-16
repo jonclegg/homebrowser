@@ -12,20 +12,29 @@ import humanize
 
 CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:9222")
 BING = "https://www.bing.com/"
+# (CSS selector, text the element must hold or None), read with humanize.find.
 SEARCH_BOXES = (
-    'textarea[name="q"]',
-    'input[name="q"]',
-    "#sb_form_q",
+    ('textarea[name="q"]', None),
+    ('input[name="q"]', None),
+    ("#sb_form_q", None),
 )
 SEARCH_BUTTONS = (
-    "#search_icon",
-    "#sb_form_go",
-    'button[aria-label="Search"]',
+    ("#search_icon", None),
+    ("#sb_form_go", None),
+    ('button[aria-label="Search"]', None),
 )
 CONSENT_BUTTONS = (
-    "#bnp_btn_accept",
-    'button:has-text("Accept")',
+    ("#bnp_btn_accept", None),
+    ("button", "Accept"),
 )
+# Bing's organic results in one evaluate, as humanize.find reads pages: Patchright's
+# locator API costs a burst of CDP calls per element read (see humanize.find).
+RESULTS_SCRIPT = """() => [...document.querySelectorAll('#b_results li.b_algo:not(.b_ad) h2 a')].map(link => {
+  const box = link.getBoundingClientRect();
+  const cite = link.closest('li.b_algo').querySelector('cite');
+  return { href: link.getAttribute('href') || '', title: link.innerText || '', cite: cite ? cite.innerText : '',
+           x: box.x, y: box.y, width: box.width, height: box.height };
+})"""
 
 ###############################################################################
 
@@ -61,21 +70,11 @@ def _brand_site(domain, href, title):
 
 ###############################################################################
 
-def _visible(page, selector):
-    locator = page.locator(selector).first
-    if locator.count() == 0:
-        return None
-    if not locator.is_visible():
-        return None
-    return locator
-
-###############################################################################
-
-def _first_visible(page, selectors):
-    for selector in selectors:
-        locator = _visible(page, selector)
-        if locator is not None:
-            return locator
+def _first_visible(page, choices):
+    """The first (selector, text) choice with a visible match, or None."""
+    for selector, text in choices:
+        if humanize.find(page, selector, text) is not None:
+            return selector, text
     return None
 
 ###############################################################################
@@ -84,17 +83,15 @@ def _dismiss_consent(page):
     button = _first_visible(page, CONSENT_BUTTONS)
     if button is None:
         return
-    humanize.human_click(page, button)
+    humanize.human_click(page, *button)
     humanize.pause(0.4, 0.9)
 
 ###############################################################################
 
 def _cite_host(link):
     """The host a result's cite shows: "https://www.example.com › intl › en" is example.com."""
-    block = link.locator("xpath=ancestor::li[contains(@class,'b_algo')][1]")
-    cite = block.locator("cite").first
-    text = cite.inner_text().split("›")[0].strip() if cite.count() else ""
-    return _host(text if "://" in text else "https://" + text), cite.inner_text() if cite.count() else ""
+    text = link["cite"].split("›")[0].strip()
+    return _host(text if "://" in text else "https://" + text), link["cite"]
 
 ###############################################################################
 
@@ -115,22 +112,17 @@ def _front_page_rank(link, domain):
 ###############################################################################
 
 def _organic_link(page, domain, skip=0):
-    links = page.locator("#b_results li.b_algo:not(.b_ad) h2 a")
+    links = page.evaluate(RESULTS_SCRIPT)
     # Under load Bing sometimes answers with the search bar and an empty result
     # list, filled in a few seconds later or not at all; give it the time.
     deadline = time.time() + 10
-    while links.count() == 0 and time.time() < deadline:
+    while not links and time.time() < deadline:
         time.sleep(0.5)
-    matches = []
-    for index in range(links.count()):
-        link = links.nth(index)
-        href = link.get_attribute("href") or ""
-        if _same_site(domain, href) or _cites_domain(link, domain):
-            matches.append(link)
+        links = page.evaluate(RESULTS_SCRIPT)
+    matches = [link for link in links if _same_site(domain, link["href"]) or _cites_domain(link, domain)]
     if not matches:
-        matches = [links.nth(index) for index in range(links.count())
-                   # The href is Bing's click tracker; the cite shows where it goes.
-                   if _brand_site(domain, "https://" + _cite_host(links.nth(index))[0], links.nth(index).inner_text())]
+        # The href is Bing's click tracker; the cite shows where it goes.
+        matches = [link for link in links if _brand_site(domain, "https://" + _cite_host(link)[0], link["title"])]
     if not matches:
         raise RuntimeError(f"No organic Bing result for {domain}")
     # The site's own front page before a deep link or another subdomain: for an
@@ -184,6 +176,17 @@ def _resolve_bing_redirect(url):
     return decoded if decoded.startswith("http") else None
 
 
+def _click_result(page, link):
+    """Click a result where it is now; the page can shift between reading and clicking."""
+    current = [item for item in page.evaluate(RESULTS_SCRIPT) if item["href"] == link["href"]]
+    if not current:
+        raise RuntimeError(f"Bing result is gone from the page: {link['title']!r}")
+    box = current[0]
+    humanize.click_at(page, box["x"] + box["width"] * random.uniform(0.3, 0.7),
+                      box["y"] + box["height"] * random.uniform(0.35, 0.65))
+
+###############################################################################
+
 def _click_and_follow(page, link, domain=None):
     """Click a result and return the page it landed on.
 
@@ -206,9 +209,9 @@ def _click_and_follow(page, link, domain=None):
 
     landed = None
     # A rebates link never navigates when clicked; go straight to the fallback.
-    clicks = 0 if _is_rebates_link(link.get_attribute("href")) else 3
+    clicks = 0 if _is_rebates_link(link["href"]) else 3
     for attempt in range(clicks):
-        humanize.human_click(page, link)
+        _click_result(page, link)
         deadline = time.time() + 12
         while time.time() < deadline:
             page.wait_for_timeout(random.randint(250, 450))
@@ -228,7 +231,7 @@ def _click_and_follow(page, link, domain=None):
         # Last resort: follow Bing's own click-tracking redirect. The click just
         # never fires on some results, so resolve the destination Bing encoded in
         # the ck/a link and go there. This stays on the Bing path.
-        href = link.get_attribute("href") or ""
+        href = link["href"]
         target = _resolve_bing_redirect(href) or href
         if target.startswith("http"):
             try:
@@ -284,14 +287,14 @@ def _enter(page, domain, skip=0):
     box = _first_visible(page, SEARCH_BOXES)
     if box is None:
         raise RuntimeError("Bing search box not found")
-    humanize.human_click(page, box)
+    humanize.human_click(page, *box)
     humanize.pause(0.2, 0.5)
     humanize.human_type(page, domain)
     humanize.pause(0.4, 0.9)
     button = _first_visible(page, SEARCH_BUTTONS)
     if button is None:
         raise RuntimeError("Bing search button not found")
-    humanize.human_click(page, button)
+    humanize.human_click(page, *button)
     page.wait_for_load_state("domcontentloaded")
     humanize.pause(0.8, 1.6)
     link = _organic_link(page, domain, skip=skip)

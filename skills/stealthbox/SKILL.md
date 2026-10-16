@@ -79,15 +79,15 @@ The browser keeps running in the background (as long as OrbStack or Docker Engin
    - Before each click, `mouse.move` along a short curved path with a little jitter, then click. A single instant jump to the target reads as a script.
    - Click the input with the mouse before typing. Do not `fill()` on a bot-sensitive site.
    - Type character by character with jittered delays, including a slightly longer pause after some spaces.
+   - Find elements with `humanize.find` / `human_click` (a CSS selector, optionally the text the element holds), not Patchright's locator API (`page.locator`, `get_by_role`, `count`, `bounding_box`, `is_visible`). A locator lookup sends some 25 CDP calls; `find` sends one `page.evaluate` in an isolated world, as the agent does. A bot-check vendor challenged a search found by locator and passed the same search found by `find`.
    - Prefer clicking real buttons and links over `page.goto` once you are on the site. In-site search goes through the site's search box, then its Search button:
 
    ```python
    import humanize  # examples/humanize.py
 
-   box = page.locator("input[type='search']").first
-   humanize.human_click(page, box)
+   humanize.human_click(page, "input[type='search']")
    humanize.human_type(page, "your query")
-   humanize.human_click(page, page.get_by_role("button", name="Search"))
+   humanize.human_click(page, "button", text="Search")
    ```
 
    This is how you avoid needless challenges. If a challenge does appear, `stealthbox chat` works it (see [`stealthbox chat`](#stealthbox-chat-stealthbox-drives-you-talk)), or the user finishes it in the viewer.
